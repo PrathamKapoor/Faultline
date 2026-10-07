@@ -9,7 +9,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-001: Adopt a `src/` layout for the `edgehunter` package
 
-- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), ac9b228
 - Context: The repository started empty. An installable package plus a console entry point are required, and later phases will add further subpackages (analysis, oracle, search, generators, execution, findings, ...). The physical layout had to be chosen before any code was written.
 - Decision: Keep all importable code under `src/edgehunter/`; tests live in a separate top-level `tests/` directory.
 - Why: The `src/` layout prevents accidental imports of working-copy modules (for example when running tools from the repository root) and forces contributors to validate the packaging configuration by installing the project. It is the layout the Python Packaging User Guide recommends for packages intended for distribution.
@@ -19,7 +19,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-002: Use setuptools with a dynamic version sourced from `edgehunter.__version__`
 
-- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), ac9b228
 - Context: Packaging is defined in `pyproject.toml`. The version must be available both to the build backend and at runtime for `edgehunter --version`.
 - Decision: Build backend `setuptools>=68` with `dynamic = ["version"]` and `[tool.setuptools.dynamic] version = { attr = "edgehunter.__version__" }`. `src/edgehunter/__init__.py` contains the literal `__version__ = "0.1.0"`.
 - Why: setuptools is the most widely available backend and supports PEP 660 editable installs; reading the version via `attr` keeps a single source of truth. Because `__version__` is a simple literal, setuptools reads it without importing the package, so no runtime dependency is needed at build time.
@@ -29,7 +29,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-003: Build the CLI with Typer
 
-- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), ac9b228
 - Context: The CLI must expose `edgehunter --help`, `edgehunter --version`, and `edgehunter scan PATH` now, and is expected to grow nested commands later (`show`, `reproduce`, `report`, `export-test`). It also has to be testable in-process.
 - Decision: Use Typer (`typer>=0.12`) as the CLI framework. Console entry point `edgehunter = "edgehunter.cli:main"`, where `main()` invokes the `typer.Typer` application. One root callback hosts the eager `--version` option; `scan` is a command under the same application.
 - Why: Typer derives argument parsing from type hints, makes subcommand registration a decorator, and ships `typer.testing.CliRunner`, which invokes the application in-process and captures stdout and stderr separately. This keeps `src/edgehunter/cli.py` small and directly testable.
@@ -42,7 +42,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-004: `scan` performs filesystem discovery only, with pruned non-source directories
 
-- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), ac9b228
 - Context: The `scan` command must not pretend that analysis exists, but this phase also asks for the smallest genuinely useful behavior rather than a pure stub. Repository discovery (finding Python sources) is safe because it touches only the filesystem.
 - Decision: `scan_repository()` walks a directory with `os.walk` (symlinks not followed), prunes directories named in `EXCLUDED_DIRECTORY_NAMES` and directories ending in `.egg-info`, collects `*.py` files in sorted order, and returns an immutable `ScanSummary`. A single `*.py` file is accepted as a target; any other regular file is rejected with `UnsupportedTargetError`. The CLI prints the summary and explicitly states that repository analysis is not implemented yet.
 - Why: Real discovery is small, deterministic, and testable, and it establishes the `scanner` package that later phases build on. `os.walk` defaults to `followlinks=False`, which avoids symlink cycles and keeps the scan inside the requested tree. Exclusion by explicit name/suffix is conservative: unknown directories are always scanned.
@@ -52,7 +52,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-005: Exit codes: 0 for success, 2 for invalid user input
 
-- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), ac9b228
 - Context: Invalid input (missing path, non-Python file target) must fail with a non-zero status and without a traceback, while unexpected programming errors must stay visible.
 - Decision: The `scan` command catches `ScanError` subclasses, prints `error: <message>` to stderr, and exits with code 2 (`EXIT_INVALID_INPUT` in `src/edgehunter/cli.py`). Unexpected exceptions are not caught: they surface as tracebacks with a non-zero exit.
 - Why: Code 2 matches the convention used by argparse and click for usage errors, and keeps user errors distinguishable from internal bugs.
@@ -62,7 +62,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-006: Development tooling via the `dev` extra: pytest, ruff, mypy
 
-- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), ac9b228
 - Context: This phase requires working test infrastructure, appropriate lint/format configuration, and typed code, without creating multiple competing dependency files.
 - Decision: Declare development dependencies in `pyproject.toml` under `[project.optional-dependencies] dev` (`pytest>=8`, `ruff>=0.6`, `mypy>=1.10`), installed with `pip install -e ".[dev]"`. Configuration for pytest, ruff, and mypy lives in the same `pyproject.toml`.
 - Why: A single authoritative dependency definition; extras are supported by every pip version, unlike PEP 735 dependency groups whose pip support is still recent. All three tools are actually executed in this session's verification and are enforced by the tests/lint/typecheck in `handoff.md`.
@@ -77,10 +77,20 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-007: Verify the installed entry point with one subprocess test
 
-- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), ac9b228
 - Context: In-process `CliRunner` tests bypass packaging: they call the Typer application directly and would pass even if `[project.scripts]` were wrong or `__main__.py` were broken.
 - Decision: Keep the main CLI tests in-process (fast), and add a single end-to-end test (`test_python_dash_m_entry_point_reports_version` in `tests/test_cli.py`) that runs `python -m edgehunter --version` as a subprocess and checks its output and exit code.
 - Why: Catches packaging and entry-point mistakes that in-process tests cannot see, at the cost of one subprocess per test run.
 - Alternatives considered: Testing the installed `edgehunter` script name directly — depends on the virtual environment's `Scripts/` directory being on `PATH`, which is not guaranteed under pytest; no end-to-end test — leaves packaging untested.
 - Consequences: This test requires the package to be installed (the editable install satisfies it); running pytest from a source checkout without installing makes this test fail while the in-process tests still pass.
 - Files: tests/test_cli.py
+
+### D-008: CLI code and tests import `typer.testing` only, never a standalone `click` package
+
+- Date / phase / commit: 2026-10-08, Phase 0 (Repository Bootstrap and Engineering Foundation), ac9b228
+- Context: While verifying the CLI, the Typer installed in the project virtual environment (typer 0.27.3) was found to vendor click internally (`typer._click`): `import click` raises `ModuleNotFoundError` in the venv, and the typer distribution declares no click requirement. Older Typer versions allowed by the `typer>=0.12` spec depend on a separate `click` package instead. Any CLI test must work under both layouts.
+- Decision: Production and test code import only `typer` and `typer.testing` (`CliRunner`, `Result`); nothing imports `click` directly, and `click` is not declared in `pyproject.toml`.
+- Why: `typer.testing.CliRunner` provides everything the tests need (in-process invocation, merged `output`, separate `stderr`) regardless of whether click is vendored or a separate distribution. A probe with typer 0.27.2 + click 8.3.1 (global environment) confirmed `click.testing.CliRunner` refuses a `typer.Typer` object with `AttributeError: 'Typer' object has no attribute 'name'`, so importing click offered no benefit.
+- Alternatives considered: Declaring `click` as a direct test dependency and using `click.testing.CliRunner` — imports an object Typer does not promise to expose and would diverge across Typer versions.
+- Consequences: Future CLI code and tests must not `import click`; use `typer.testing` and Typer's own helpers. The `typer>=0.12` floor admits versions both with and without vendored click; this decision keeps the project compatible with both.
+- Files: tests/test_cli.py, decisions.md
