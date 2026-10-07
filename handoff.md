@@ -141,7 +141,8 @@ Commands actually executed in this session and their results:
   -> All checks passed!   (after fixing one B008 warning by adopting Annotated)
 
 .venv\Scripts\python.exe -m ruff format --check .
-  -> 9 files already formatted
+  -> 9 files already formatted (run before README.md and handoff.md existed)
+  -> 11 files already formatted (final run: 7 Python files + 4 Markdown files; see Known Issues)
 
 .venv\Scripts\python.exe -m mypy
   -> Success: no issues found in 7 source files
@@ -180,6 +181,7 @@ Not tested (do not assume these work):
 - Suffix matching is case-sensitive: a file named `X.PY` is not collected even on case-insensitive Windows filesystems. Intentional per D-004, but may surprise.
 - The exclusion list is policy, not truth; unconventional vendor directories will be scanned.
 - Help output is rendered by rich (installed transitively by typer 0.27.3); box-drawing and layout may differ across typer/rich versions. Tests assert only substrings, not exact formatting.
+- `ruff format` (0.16.10) also formats Python code fences inside Markdown files: `ruff format --check .` counts README.md, decisions.md, flow.md, and handoff.md alongside the 7 Python files (confirmed with `--verbose`). Untagged or non-Python code fences in the current docs are left untouched. Future doc edits with ```` ```python ```` fences will be reformatted by `ruff format`.
 - No `LICENSE` file has been chosen. Public release needs a license decision.
 - README contains a `<repository-url>` placeholder in the install instructions; no remote exists yet.
 - No CI workflow exists; checks are manual commands (listed in README and section 7).
