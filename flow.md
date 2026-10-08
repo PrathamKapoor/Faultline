@@ -356,17 +356,17 @@ flowchart TD
 
 | Area | Change | Files | Commit | Decision |
 |---|---|---|---|---|
-| scanner | Added the canonical annotation interpreter and built each shape from the `ast.arg` node during the existing traversal; stored on `ParameterInfo.shape` | src/edgehunter/scanner/annotations.py, src/edgehunter/scanner/models.py, src/edgehunter/scanner/targets.py, src/edgehunter/scanner/__init__.py | uncommitted | D-036 |
-| analysis | Boundary applicability reads the annotation shape, so nullable integers receive numeric candidates | src/edgehunter/analysis/boundaries.py | uncommitted | D-036 |
+| scanner | Added the canonical annotation interpreter and built each shape from the `ast.arg` node during the existing traversal; stored on `ParameterInfo.shape` | src/edgehunter/scanner/annotations.py, src/edgehunter/scanner/models.py, src/edgehunter/scanner/targets.py, src/edgehunter/scanner/__init__.py | 4c6b922 | D-036 |
+| analysis | Boundary applicability reads the annotation shape, so nullable integers receive numeric candidates | src/edgehunter/analysis/boundaries.py | 4c6b922 | D-036 |
 | generation | Removed the `None` element placeholder; collection values now come from element baselines | src/edgehunter/generation/materialize.py | 4c6b922 | D-037 |
 | generation | Extended the action vocabulary with `SET_NONE` and `DUPLICATE_ELEMENT_COLLECTION`; annotation applicability keyed on shape | src/edgehunter/generation/models.py, src/edgehunter/generation/actions.py | 4c6b922 | D-038 |
-| generation | Added safe baseline synthesis with explicit provenance and fixed filler precedence | src/edgehunter/generation/baselines.py | uncommitted | D-039 |
-| generation | Added typed invocation plans: one adversarial assignment, placement, declared defaults, receiver requirement, four statuses | src/edgehunter/generation/invocation.py | uncommitted | D-040 |
-| generation | Added symbolic parameter-reference resolution reusing the one adjacency materializer | src/edgehunter/generation/invocation.py | uncommitted | D-041 |
-| generation | Added the framework-independent strategy-plan layer; Hypothesis deliberately not added | src/edgehunter/generation/strategy.py | uncommitted | D-043 |
-| generation | Added repository aggregation: one plan per case, one strategy plan per target, annotation report | src/edgehunter/generation/planning.py | uncommitted | D-040, D-043 |
-| oracle | Recorded literal-only test-call arguments for use as observed baselines | src/edgehunter/oracle/models.py, src/edgehunter/oracle/test_expectations.py | uncommitted | D-042 |
-| pipeline | `RepositoryScan` gained `planning` and `annotations`; observed literals feed the planner | src/edgehunter/pipeline.py | uncommitted | D-040, D-042 |
-| CLI | `scan` gained `--annotations`, `--plans`, `--strategies`, a Planning summary block, and plans/strategies before source issues | src/edgehunter/cli.py | uncommitted | D-044 |
-| tests | Added annotation, invocation, and strategy suites; extended boundary, action, case, CLI, pipeline, and safety tests | tests/test_annotations.py, tests/test_invocation.py, tests/test_strategy.py, tests/test_boundaries.py, tests/test_generation_actions.py, tests/test_generation_cases.py, tests/test_generation_materialize.py, tests/test_cli.py, tests/test_pipeline.py, tests/test_safety.py | uncommitted | D-036..D-044 |
-| docs | Added decisions D-039..D-044 and updated this flow document | decisions.md, flow.md | uncommitted | none |
+| generation | Added safe baseline synthesis with explicit provenance and fixed filler precedence | src/edgehunter/generation/baselines.py | 52fb551 | D-039 |
+| generation | Added typed invocation plans: one adversarial assignment, placement, declared defaults, receiver requirement, four statuses | src/edgehunter/generation/invocation.py | 52fb551 | D-040 |
+| generation | Added symbolic parameter-reference resolution reusing the one adjacency materializer | src/edgehunter/generation/invocation.py | 52fb551 | D-041 |
+| generation | Added the framework-independent strategy-plan layer; Hypothesis deliberately not added | src/edgehunter/generation/strategy.py | 52fb551 | D-043 |
+| generation | Added repository aggregation: one plan per case, one strategy plan per target, annotation report | src/edgehunter/generation/planning.py | 52fb551 | D-040, D-043 |
+| oracle | Recorded literal-only test-call arguments for use as observed baselines | src/edgehunter/oracle/models.py, src/edgehunter/oracle/test_expectations.py | 52fb551 | D-042 |
+| pipeline | `RepositoryScan` gained `planning` and `annotations`; observed literals feed the planner | src/edgehunter/pipeline.py | 52fb551 | D-040, D-042 |
+| CLI | `scan` gained `--annotations`, `--plans`, `--strategies`, a Planning summary block, and plans/strategies before source issues | src/edgehunter/cli.py | 52fb551 | D-044 |
+| tests | Added annotation, invocation, and strategy suites; extended boundary, action, case, CLI, pipeline, and safety tests | tests/test_annotations.py, tests/test_invocation.py, tests/test_strategy.py, tests/test_boundaries.py, tests/test_generation_actions.py, tests/test_generation_cases.py, tests/test_generation_materialize.py, tests/test_cli.py, tests/test_pipeline.py, tests/test_safety.py | 52fb551 | D-036..D-044 |
+| docs | Added decisions D-036..D-044 and updated this flow document | decisions.md, flow.md | 4c6b922, 52fb551 | none |
