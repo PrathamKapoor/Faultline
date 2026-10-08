@@ -33,6 +33,7 @@ from edgehunter.analysis.models import (
     TargetSemantics,
     invert_comparison_operator,
 )
+from edgehunter.scanner.annotations import AnnotationKind
 from edgehunter.scanner.models import (
     SINGLE_VALUE_PARAMETER_KINDS,
     FunctionInfo,
@@ -40,13 +41,13 @@ from edgehunter.scanner.models import (
     ParameterInfo,
 )
 
-_NUMERIC_ANNOTATION_KINDS: Final[dict[str, tuple[BoundaryKind, ...]]] = {
-    "int": (
+_NUMERIC_SHAPE_KINDS: Final[dict[AnnotationKind, tuple[BoundaryKind, ...]]] = {
+    AnnotationKind.INT: (
         BoundaryKind.ZERO,
         BoundaryKind.ONE,
         BoundaryKind.NEGATIVE_ONE,
     ),
-    "float": (
+    AnnotationKind.FLOAT: (
         BoundaryKind.ZERO,
         BoundaryKind.ONE,
         BoundaryKind.NEGATIVE_ONE,
@@ -188,11 +189,15 @@ def mine_module_boundaries(
 
 
 def _generic_numeric_kinds(parameter: ParameterInfo) -> tuple[BoundaryKind, ...]:
-    if parameter.annotation is None:
-        return ()
+    """Generic numeric candidates for a parameter, keyed on its static shape.
+
+    The shape is the conservative interpretation built during the single parse,
+    so a nullable annotation such as ``int | None`` is still an integer here.
+    ``bool`` is deliberately excluded: it is a distinct shape, not an integer.
+    """
     if parameter.kind not in SINGLE_VALUE_PARAMETER_KINDS:
         return ()
-    return _NUMERIC_ANNOTATION_KINDS.get(parameter.annotation, ())
+    return _NUMERIC_SHAPE_KINDS.get(parameter.shape.kind, ())
 
 
 def _normalize(

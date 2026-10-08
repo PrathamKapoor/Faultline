@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 
+from edgehunter.scanner.annotations import build_static_annotation
 from edgehunter.scanner.models import (
     ClassInfo,
     FunctionInfo,
@@ -204,6 +205,7 @@ def _build_parameter(
         kind=kind,
         annotation=_render_optional(argument.annotation),
         has_default=has_default,
+        shape=build_static_annotation(argument.annotation),
     )
 
 

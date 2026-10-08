@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from edgehunter.scanner.annotations import AnnotationKind, StaticAnnotation
+
 
 class ParameterKind(str, Enum):
     """How a parameter may be supplied by callers (mirrors the ``ast`` buckets)."""
@@ -53,12 +55,20 @@ SINGLE_VALUE_PARAMETER_KINDS: frozenset[ParameterKind] = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ParameterInfo:
-    """One declared parameter of a callable, as written in the source."""
+    """One declared parameter of a callable, as written in the source.
+
+    ``annotation`` keeps the annotation as source text, for display. ``shape`` is
+    the conservative static interpretation of that same annotation, built during
+    the single existing parse: later stages should read ``shape`` instead of
+    matching ``annotation`` text themselves, so annotation interpretation has a
+    single implementation.
+    """
 
     name: str
     kind: ParameterKind
     annotation: str | None
     has_default: bool
+    shape: StaticAnnotation = StaticAnnotation(kind=AnnotationKind.UNKNOWN)
 
 
 @dataclass(frozen=True, slots=True)

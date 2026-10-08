@@ -298,12 +298,12 @@ def test_scan_reports_semantic_action_statistics(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "Semantic actions" in result.output
-    assert stat_value(result.output, "Actions proposed") == 8
-    assert stat_value(result.output, "Concrete values") == 8
+    assert stat_value(result.output, "Actions proposed") == 9
+    assert stat_value(result.output, "Concrete values") == 7
     assert stat_value(result.output, "Symbolic values") == 0
-    assert stat_value(result.output, "Unsupported actions") == 0
+    assert stat_value(result.output, "Unsupported actions") == 2
     assert stat_value(result.output, "Targets with actions") == 1
-    assert stat_value(result.output, "Candidate cases") == 8
+    assert stat_value(result.output, "Candidate cases") == 7
 
 
 def test_scan_lists_actions_with_flag(tmp_path: Path) -> None:
@@ -322,14 +322,26 @@ def test_scan_lists_actions_with_flag(tmp_path: Path) -> None:
 
 
 def test_scan_lists_collection_actions_from_annotations(tmp_path: Path) -> None:
-    (tmp_path / "m.py").write_text("def f(items: list):\n    return items\n", encoding="utf-8")
+    (tmp_path / "m.py").write_text("def f(items: list[int]):\n    return items\n", encoding="utf-8")
 
     result = invoke("scan", str(tmp_path), "--actions")
 
     assert result.exit_code == 0
     assert "[annotation]" in result.output
     assert "[]" in result.output
-    assert "[None]" in result.output
+    assert "[0]" in result.output
+    assert "[0, 0]" in result.output
+
+
+def test_scan_never_fabricates_a_none_placeholder(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text("def f(items: list):\n    return items\n", encoding="utf-8")
+
+    result = invoke("scan", str(tmp_path), "--actions")
+
+    assert result.exit_code == 0
+    assert "[]" in result.output
+    assert "[None]" not in result.output
+    assert "not treated as nullable" in result.output
 
 
 def test_scan_lists_candidates_with_flag(tmp_path: Path) -> None:

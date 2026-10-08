@@ -1,5 +1,11 @@
 """Repository discovery and static AST analysis for EdgeHunter."""
 
+from edgehunter.scanner.annotations import (
+    UNKNOWN_ANNOTATION,
+    AnnotationKind,
+    StaticAnnotation,
+    build_static_annotation,
+)
 from edgehunter.scanner.ast_parser import (
     SourceFile,
     analyze_python_file,
@@ -36,6 +42,8 @@ __all__ = [
     "METHOD_KINDS",
     "RECEIVER_PARAMETER_NAMES",
     "SINGLE_VALUE_PARAMETER_KINDS",
+    "UNKNOWN_ANNOTATION",
+    "AnnotationKind",
     "CallableNode",
     "ClassInfo",
     "FunctionInfo",
@@ -48,12 +56,14 @@ __all__ = [
     "ScanError",
     "ScanSummary",
     "SourceFile",
+    "StaticAnnotation",
     "SyntaxIssue",
     "TargetKind",
     "UnsupportedTargetError",
     "analyze_python_file",
     "analyze_repository",
     "build_module_analysis",
+    "build_static_annotation",
     "collect_callable_nodes",
     "is_excluded_directory",
     "iter_callable_body",

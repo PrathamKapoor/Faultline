@@ -110,9 +110,17 @@ def test_symbolic_action_yields_a_symbolic_case(tmp_path: Path) -> None:
 def test_unsupported_action_is_not_a_candidate_case(tmp_path: Path) -> None:
     generation = _generation(tmp_path)
 
-    assert generation.unsupported_action_count == 2
     cases = _cases(generation, "complex_ref")
     assert [case.action.kind for case in cases] == [SemanticActionKind.AT_BOUNDARY]
+    unsupported = [
+        action
+        for entry in generation.action_sets
+        for action in entry.actions
+        if action.status is MaterializationStatus.UNSUPPORTED
+    ]
+    # Two unsupported neighbours around the complex literal, plus the singleton
+    # and repeated-element actions of the bare ``items: list`` parameter.
+    assert len(unsupported) == 4
 
 
 def test_every_case_carries_exactly_one_action(tmp_path: Path) -> None:
@@ -179,10 +187,8 @@ def test_targets_without_evidence_are_omitted(tmp_path: Path) -> None:
 
 
 def test_collection_target_is_reported(tmp_path: Path) -> None:
+    """A bare ``list`` yields the empty collection but no fabricated singleton."""
     generation = _generation(tmp_path)
 
     kinds = {case.action.kind for case in _cases(generation, "collection")}
-    assert kinds == {
-        SemanticActionKind.EMPTY_COLLECTION,
-        SemanticActionKind.SINGLETON_COLLECTION,
-    }
+    assert kinds == {SemanticActionKind.EMPTY_COLLECTION}

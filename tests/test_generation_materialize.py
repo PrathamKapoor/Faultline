@@ -8,20 +8,28 @@ import pytest
 
 from edgehunter.analysis.models import BoundaryKind, ConstantKind
 from edgehunter.generation import (
-    AnnotationCategory,
     LiteralKind,
     MaterializationStatus,
     SemanticActionKind,
     materialize_collection,
     materialize_generic_numeric,
+    materialize_none,
     materialize_relational,
     parse_float_literal,
     parse_integer_literal,
 )
+from edgehunter.scanner import AnnotationKind, StaticAnnotation
 
 AT = SemanticActionKind.AT_BOUNDARY
 BELOW = SemanticActionKind.JUST_BELOW_BOUNDARY
 ABOVE = SemanticActionKind.JUST_ABOVE_BOUNDARY
+EMPTY = SemanticActionKind.EMPTY_COLLECTION
+SINGLE = SemanticActionKind.SINGLETON_COLLECTION
+DUPLICATE = SemanticActionKind.DUPLICATE_ELEMENT_COLLECTION
+
+
+INT_SHAPE = StaticAnnotation(kind=AnnotationKind.INT)
+FLOAT_SHAPE = StaticAnnotation(kind=AnnotationKind.FLOAT)
 
 
 def test_integer_neighbours_are_exact() -> None:
@@ -111,7 +119,7 @@ def test_other_literals_match_but_do_not_step(
 
 
 def test_generic_numeric_values_for_an_int_parameter() -> None:
-    outcome = materialize_generic_numeric(BoundaryKind.ZERO, "int")
+    outcome = materialize_generic_numeric(BoundaryKind.ZERO, INT_SHAPE)
 
     assert outcome.status is MaterializationStatus.CONCRETE
     assert outcome.value_text == "0"
@@ -119,48 +127,151 @@ def test_generic_numeric_values_for_an_int_parameter() -> None:
 
 
 def test_generic_numeric_values_for_a_float_parameter() -> None:
-    outcome = materialize_generic_numeric(BoundaryKind.ZERO, "float")
+    outcome = materialize_generic_numeric(BoundaryKind.ZERO, FLOAT_SHAPE)
 
     assert outcome.value_text == "0.0"
     assert outcome.literal_kind is LiteralKind.FLOAT
 
 
 def test_generic_nan_has_no_int_rendering() -> None:
-    outcome = materialize_generic_numeric(BoundaryKind.NAN, "int")
+    outcome = materialize_generic_numeric(BoundaryKind.NAN, INT_SHAPE)
 
     assert outcome.status is MaterializationStatus.UNSUPPORTED
     assert outcome.value_text is None
 
 
+def test_nullable_int_is_still_rendered_as_an_integer() -> None:
+    outcome = materialize_generic_numeric(
+        BoundaryKind.ZERO, StaticAnnotation(kind=AnnotationKind.INT, nullable=True)
+    )
+
+    assert outcome.value_text == "0"
+    assert outcome.literal_kind is LiteralKind.INTEGER
+
+
+def test_none_is_only_proposed_when_the_annotation_permits_it() -> None:
+    allowed = materialize_none(StaticAnnotation(kind=AnnotationKind.INT, nullable=True))
+    refused = materialize_none(INT_SHAPE)
+
+    assert allowed.value_text == "None"
+    assert allowed.literal_kind is LiteralKind.NOTHING
+    assert refused.status is MaterializationStatus.UNSUPPORTED
+
+
 @pytest.mark.parametrize(
-    ("category", "empty", "singleton"),
+    ("kind", "element", "empty", "singleton", "duplicate"),
     [
-        (AnnotationCategory.LIST, "[]", "[None]"),
-        (AnnotationCategory.TUPLE, "()", "(None,)"),
-        (AnnotationCategory.MAPPING, "{}", "{None: None}"),
-        (AnnotationCategory.SET, "set()", "{None}"),
-        (AnnotationCategory.FROZENSET, "frozenset()", "frozenset({None})"),
+        (AnnotationKind.LIST, INT_SHAPE, "[]", "[0]", "[0, 0]"),
+        (AnnotationKind.TUPLE, INT_SHAPE, "()", "(0,)", "(0, 0)"),
+        (
+            AnnotationKind.SET,
+            StaticAnnotation(kind=AnnotationKind.BOOL),
+            "set()",
+            "{False}",
+            None,
+        ),
     ],
 )
-def test_collection_values_per_category(
-    category: AnnotationCategory, empty: str, singleton: str
+def test_collection_values_use_the_element_baseline(
+    kind: AnnotationKind,
+    element: StaticAnnotation,
+    empty: str,
+    singleton: str,
+    duplicate: str | None,
 ) -> None:
-    assert materialize_collection(SemanticActionKind.EMPTY_COLLECTION, category).value_text == empty
-    outcome = materialize_collection(SemanticActionKind.SINGLETON_COLLECTION, category)
-    assert outcome.value_text == singleton
-    assert outcome.literal_kind is LiteralKind.COLLECTION
+    shape = StaticAnnotation(kind=kind, element=element)
+
+    assert materialize_collection(EMPTY, shape).value_text == empty
+    assert materialize_collection(SINGLE, shape).value_text == singleton
+    if duplicate is None:
+        assert materialize_collection(DUPLICATE, shape).status is (
+            MaterializationStatus.UNSUPPORTED
+        )
+    else:
+        assert materialize_collection(DUPLICATE, shape).value_text == duplicate
 
 
-def test_collection_value_for_an_unknown_category() -> None:
-    outcome = materialize_collection(
-        SemanticActionKind.EMPTY_COLLECTION, AnnotationCategory.UNKNOWN
+def test_dict_singleton_uses_key_and_value_baselines() -> None:
+    shape = StaticAnnotation(
+        kind=AnnotationKind.DICT,
+        key=StaticAnnotation(kind=AnnotationKind.STR),
+        value=INT_SHAPE,
     )
+
+    assert materialize_collection(EMPTY, shape).value_text == "{}"
+    assert materialize_collection(SINGLE, shape).value_text == '{"": 0}'
+
+
+def test_unknown_element_type_never_fabricates_a_placeholder() -> None:
+    """Phase 5 supersedes the Phase 4 ``None`` element placeholder."""
+    shape = StaticAnnotation(kind=AnnotationKind.LIST, element=None)
+
+    assert materialize_collection(EMPTY, shape).value_text == "[]"
+    for action in (SINGLE, DUPLICATE):
+        outcome = materialize_collection(action, shape)
+        assert outcome.status is MaterializationStatus.UNSUPPORTED
+        assert outcome.value_text is None
+        assert "no trustworthy element baseline" in outcome.reason
+
+
+def test_unknown_element_shape_never_fabricates_a_placeholder() -> None:
+    shape = StaticAnnotation(
+        kind=AnnotationKind.LIST, element=StaticAnnotation(kind=AnnotationKind.UNKNOWN)
+    )
+
+    assert materialize_collection(SINGLE, shape).status is MaterializationStatus.UNSUPPORTED
+
+
+def test_unhashable_element_is_not_rendered_as_a_set() -> None:
+    shape = StaticAnnotation(
+        kind=AnnotationKind.SET,
+        element=StaticAnnotation(kind=AnnotationKind.LIST, element=INT_SHAPE),
+    )
+
+    assert materialize_collection(SINGLE, shape).status is MaterializationStatus.UNSUPPORTED
+
+
+def test_nullable_element_prefers_the_non_null_baseline() -> None:
+    shape = StaticAnnotation(
+        kind=AnnotationKind.LIST,
+        element=StaticAnnotation(kind=AnnotationKind.INT, nullable=True),
+    )
+
+    assert materialize_collection(SINGLE, shape).value_text == "[0]"
+
+
+def test_nested_collection_singleton_uses_the_inner_baseline() -> None:
+    """A nested container element is filled with its own baseline, not by recursing."""
+    shape = StaticAnnotation(
+        kind=AnnotationKind.LIST,
+        element=StaticAnnotation(kind=AnnotationKind.LIST, element=INT_SHAPE),
+    )
+
+    assert materialize_collection(SINGLE, shape).value_text == "[[]]"
+    assert materialize_collection(DUPLICATE, shape).value_text == "[[], []]"
+
+
+def test_empty_container_needs_no_element() -> None:
+    for kind in (
+        AnnotationKind.LIST,
+        AnnotationKind.TUPLE,
+        AnnotationKind.SET,
+        AnnotationKind.DICT,
+    ):
+        outcome = materialize_collection(EMPTY, StaticAnnotation(kind=kind))
+        assert outcome.status is MaterializationStatus.CONCRETE
+
+
+def test_collection_value_for_an_unknown_shape() -> None:
+    outcome = materialize_collection(EMPTY, StaticAnnotation(kind=AnnotationKind.UNKNOWN))
 
     assert outcome.status is MaterializationStatus.UNSUPPORTED
 
 
 def test_non_collection_action_is_rejected() -> None:
-    outcome = materialize_collection(SemanticActionKind.SET_ZERO, AnnotationCategory.LIST)
+    outcome = materialize_collection(
+        SemanticActionKind.SET_ZERO, StaticAnnotation(kind=AnnotationKind.LIST)
+    )
 
     assert outcome.status is MaterializationStatus.UNSUPPORTED
 

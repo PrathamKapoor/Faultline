@@ -24,15 +24,18 @@ from pathlib import Path
 from typing import Final
 
 from edgehunter.analysis.models import BoundaryKind
+from edgehunter.scanner.annotations import StaticAnnotation
 
 
 class SemanticActionKind(str, Enum):
     """The finite vocabulary of inputs EdgeHunter is allowed to propose.
 
-    The first nine members correspond one-to-one with the numeric and relational
+    Ten members correspond one-to-one with the numeric and relational
     :class:`~edgehunter.analysis.models.BoundaryKind` values that boundary
-    mining can produce. The last two are collection-shaped actions, which
-    boundary mining does not model.
+    mining can produce. The other four are annotation-driven and have no
+    boundary counterpart: ``SET_NONE`` (the annotation permits ``None``) and the
+    three collection shapes ``EMPTY_COLLECTION``, ``SINGLETON_COLLECTION``, and
+    ``DUPLICATE_ELEMENT_COLLECTION``.
     """
 
     JUST_BELOW_BOUNDARY = "just_below_boundary"
@@ -42,11 +45,13 @@ class SemanticActionKind(str, Enum):
     SET_ONE = "set_one"
     SET_NEGATIVE_ONE = "set_negative_one"
     SET_NEGATIVE_ZERO = "set_negative_zero"
+    SET_NONE = "set_none"
     USE_NAN = "use_nan"
     USE_POSITIVE_INFINITY = "use_positive_infinity"
     USE_NEGATIVE_INFINITY = "use_negative_infinity"
     EMPTY_COLLECTION = "empty_collection"
     SINGLETON_COLLECTION = "singleton_collection"
+    DUPLICATE_ELEMENT_COLLECTION = "duplicate_element_collection"
 
 
 ACTION_KIND_ORDER: Final[dict[SemanticActionKind, int]] = {
@@ -57,11 +62,13 @@ ACTION_KIND_ORDER: Final[dict[SemanticActionKind, int]] = {
     SemanticActionKind.SET_ONE: 4,
     SemanticActionKind.SET_NEGATIVE_ONE: 5,
     SemanticActionKind.SET_NEGATIVE_ZERO: 6,
-    SemanticActionKind.USE_NAN: 7,
-    SemanticActionKind.USE_POSITIVE_INFINITY: 8,
-    SemanticActionKind.USE_NEGATIVE_INFINITY: 9,
-    SemanticActionKind.EMPTY_COLLECTION: 10,
-    SemanticActionKind.SINGLETON_COLLECTION: 11,
+    SemanticActionKind.SET_NONE: 7,
+    SemanticActionKind.USE_NAN: 8,
+    SemanticActionKind.USE_POSITIVE_INFINITY: 9,
+    SemanticActionKind.USE_NEGATIVE_INFINITY: 10,
+    SemanticActionKind.EMPTY_COLLECTION: 11,
+    SemanticActionKind.SINGLETON_COLLECTION: 12,
+    SemanticActionKind.DUPLICATE_ELEMENT_COLLECTION: 13,
 }
 
 
@@ -118,22 +125,6 @@ class CandidateCompleteness(str, Enum):
     """The action's value depends on a name, so no concrete input exists yet."""
 
 
-class AnnotationCategory(str, Enum):
-    """The annotation categories this phase recognizes.
-
-    Only the concrete builtin collection types are recognized. A subscripted or
-    imported annotation stays :attr:`UNKNOWN` rather than being guessed at, so
-    an unrecognized type yields no generic action.
-    """
-
-    LIST = "list"
-    TUPLE = "tuple"
-    MAPPING = "mapping"
-    SET = "set"
-    FROZENSET = "frozenset"
-    UNKNOWN = "unknown"
-
-
 @dataclass(frozen=True, slots=True)
 class ActionEvidence:
     """One source location that justified an action."""
@@ -165,7 +156,7 @@ class SemanticAction:
     kind: SemanticActionKind
     origin: ActionOrigin
     status: MaterializationStatus
-    annotation_category: AnnotationCategory
+    annotation: StaticAnnotation
     boundary_kind: BoundaryKind | None
     reference: str | None
     value_text: str | None

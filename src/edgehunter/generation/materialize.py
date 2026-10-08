@@ -6,6 +6,11 @@ module imports, calls, or evaluates analyzed code, and no reference expression
 is ever evaluated to obtain a value: a comparison against a name stays symbolic,
 which is the conservative outcome rather than a fabricated number.
 
+Collection values are built from the element baseline the static annotation
+shape actually supports. When the element type is unknown there is **no**
+value: an unrecognized element yields ``UNSUPPORTED`` with a reason, never a
+``None`` placeholder standing in for a type EdgeHunter does not know.
+
 Literal text is parsed with ``int``/``float``, never ``eval`` or
 ``ast.literal_eval``, and only after the analysis layer has already classified
 the expression as an integer or float literal.
@@ -18,12 +23,9 @@ from dataclasses import dataclass
 from typing import Final
 
 from edgehunter.analysis.models import BoundaryKind, ConstantKind
-from edgehunter.generation.models import (
-    AnnotationCategory,
-    LiteralKind,
-    MaterializationStatus,
-    SemanticActionKind,
-)
+from edgehunter.generation.baselines import baseline_for
+from edgehunter.generation.models import LiteralKind, MaterializationStatus, SemanticActionKind
+from edgehunter.scanner.annotations import AnnotationKind, StaticAnnotation
 
 # How a value is written down. ``value_text`` is a self-contained Python
 # expression for a concrete value; ``symbolic_text`` names what a symbolic value
@@ -54,29 +56,21 @@ _CONSTANT_TO_LITERAL_KIND: Final[dict[ConstantKind, LiteralKind]] = {
     ConstantKind.COMPLEX: LiteralKind.COMPLEX,
 }
 
-_COLLECTION_EMPTY_VALUES: Final[dict[AnnotationCategory, str]] = {
-    AnnotationCategory.LIST: "[]",
-    AnnotationCategory.TUPLE: "()",
-    AnnotationCategory.MAPPING: "{}",
-    AnnotationCategory.SET: "set()",
-    AnnotationCategory.FROZENSET: "frozenset()",
-}
-
-# The element of a singleton collection is a placeholder: the element type is
-# not known from a bare ``list``/``dict`` annotation. ``None`` is used because it
-# is valid for every recognized collection, and because a target that rejects it
-# is exercising its own validation, which is exactly the evidence EdgeHunter
-# wants to reach.
-_COLLECTION_SINGLETON_VALUES: Final[dict[AnnotationCategory, str]] = {
-    AnnotationCategory.LIST: "[None]",
-    AnnotationCategory.TUPLE: "(None,)",
-    AnnotationCategory.MAPPING: "{None: None}",
-    AnnotationCategory.SET: "{None}",
-    AnnotationCategory.FROZENSET: "frozenset({None})",
+# An empty container needs no element knowledge at all, which is why these are
+# keyed purely by container kind.
+_COLLECTION_EMPTY_VALUES: Final[dict[AnnotationKind, str]] = {
+    AnnotationKind.LIST: "[]",
+    AnnotationKind.TUPLE: "()",
+    AnnotationKind.SET: "set()",
+    AnnotationKind.DICT: "{}",
 }
 
 _COLLECTION_ACTIONS: Final[frozenset[SemanticActionKind]] = frozenset(
-    {SemanticActionKind.EMPTY_COLLECTION, SemanticActionKind.SINGLETON_COLLECTION}
+    {
+        SemanticActionKind.EMPTY_COLLECTION,
+        SemanticActionKind.SINGLETON_COLLECTION,
+        SemanticActionKind.DUPLICATE_ELEMENT_COLLECTION,
+    }
 )
 
 
@@ -92,27 +86,41 @@ class Materialization:
 
 
 def materialize_generic_numeric(
-    boundary_kind: BoundaryKind, annotation: str | None
+    boundary_kind: BoundaryKind, shape: StaticAnnotation
 ) -> Materialization:
     """Materialize a generic numeric boundary candidate for an annotated parameter.
 
-    Boundary mining only emits these for an exact ``int`` or ``float``
-    annotation, so the rendering is chosen to match the declared type: a ``float``
-    parameter receives ``0.0`` rather than ``0``.
+    The rendering follows the declared shape: a ``float`` parameter receives
+    ``0.0`` rather than ``0``, and a nullable integer is still an integer.
     """
-    table = _GENERIC_FLOAT_VALUES if annotation == "float" else _GENERIC_INTEGER_VALUES
+    table = _GENERIC_FLOAT_VALUES if shape.kind is AnnotationKind.FLOAT else _GENERIC_INTEGER_VALUES
     entry = table.get(boundary_kind)
     if entry is None:
         return Materialization(
             status=MaterializationStatus.UNSUPPORTED,
-            reason=f"no generic {boundary_kind.value} value for an {annotation} parameter",
+            reason=f"no generic {boundary_kind.value} value for a {shape.description} parameter",
         )
     value_text, literal_kind = entry
     return Materialization(
         status=MaterializationStatus.CONCRETE,
-        reason=f"generic numeric candidate for an {annotation} parameter",
+        reason=f"generic numeric candidate for a {shape.description} parameter",
         value_text=value_text,
         literal_kind=literal_kind,
+    )
+
+
+def materialize_none(shape: StaticAnnotation) -> Materialization:
+    """Materialize ``None`` for a parameter whose annotation permits it."""
+    if not shape.is_nullable:
+        return Materialization(
+            status=MaterializationStatus.UNSUPPORTED,
+            reason=f"{shape.description} does not permit None",
+        )
+    return Materialization(
+        status=MaterializationStatus.CONCRETE,
+        reason=f"annotation {shape.description} permits None",
+        value_text="None",
+        literal_kind=LiteralKind.NOTHING,
     )
 
 
@@ -148,40 +156,52 @@ def materialize_relational(
     return _literal_reference(action, reference, constant_kind)
 
 
-def materialize_collection(
-    action: SemanticActionKind, category: AnnotationCategory
-) -> Materialization:
-    """Materialize an empty or singleton collection for a recognized annotation."""
+def materialize_collection(action: SemanticActionKind, shape: StaticAnnotation) -> Materialization:
+    """Materialize a collection shape for a recognized annotation.
+
+    ``EMPTY_COLLECTION`` is always available for a recognized container kind.
+    ``SINGLETON_COLLECTION`` additionally needs a trustworthy element baseline,
+    and ``DUPLICATE_ELEMENT_COLLECTION`` needs one too and is limited to ordered
+    containers where a repeated element is meaningful. When the element shape is
+    unknown the result is ``UNSUPPORTED``; no placeholder element is invented.
+    """
+    empty = _COLLECTION_EMPTY_VALUES.get(shape.kind)
     if action is SemanticActionKind.EMPTY_COLLECTION:
-        values = _COLLECTION_EMPTY_VALUES
-    elif action is SemanticActionKind.SINGLETON_COLLECTION:
-        values = _COLLECTION_SINGLETON_VALUES
-    else:
+        if empty is None:
+            return _not_a_collection(action, shape)
+        return Materialization(
+            status=MaterializationStatus.CONCRETE,
+            reason=f"{shape.description}: empty container needs no element value",
+            value_text=empty,
+            literal_kind=LiteralKind.COLLECTION,
+        )
+
+    if action is SemanticActionKind.DUPLICATE_ELEMENT_COLLECTION and shape.kind not in (
+        AnnotationKind.LIST,
+        AnnotationKind.TUPLE,
+    ):
         return Materialization(
             status=MaterializationStatus.UNSUPPORTED,
-            reason=f"{action.value} is not a collection action",
+            reason=(
+                "a repeated element is only meaningful for a list or tuple, "
+                f"not {shape.description}"
+            ),
         )
-    value_text = values.get(category)
-    if value_text is None:
-        return Materialization(
-            status=MaterializationStatus.UNSUPPORTED,
-            reason=f"no collection value known for category {category.value}",
-        )
+
+    entry = _collection_entry(action, shape)
+    if entry is None:
+        return _no_element_baseline(action, shape)
+    value_text, note = entry
     return Materialization(
         status=MaterializationStatus.CONCRETE,
-        reason=(
-            f"parameter annotated {category.value}; the singleton element is a "
-            "placeholder because the element type is not known statically"
-        )
-        if action is SemanticActionKind.SINGLETON_COLLECTION
-        else f"parameter annotated {category.value}",
+        reason=f"{shape.description}: {note}",
         value_text=value_text,
         literal_kind=LiteralKind.COLLECTION,
     )
 
 
 def is_collection_action(action: SemanticActionKind) -> bool:
-    """True for the two collection-shaped actions."""
+    """True for the three collection-shaped actions."""
     return action in _COLLECTION_ACTIONS
 
 
@@ -206,14 +226,95 @@ def parse_float_literal(text: str) -> float | None:
         return None
 
 
+def _collection_entry(
+    action: SemanticActionKind, shape: StaticAnnotation
+) -> tuple[str, str] | None:
+    """Build the rendered collection text, or ``None`` when unsupported."""
+    if shape.kind is AnnotationKind.DICT:
+        return _dict_entry(action, shape)
+    if shape.kind not in (AnnotationKind.LIST, AnnotationKind.TUPLE, AnnotationKind.SET):
+        return None
+    return _sequence_entry(action, shape)
+
+
+def _sequence_entry(action: SemanticActionKind, shape: StaticAnnotation) -> tuple[str, str] | None:
+    """Render a list/tuple/set entry from a known element baseline.
+
+    A nested container element is filled with *its own* baseline rather than by
+    recursing, so a ``list[list[int]]`` singleton is ``[[]]``: the inner
+    ``list[int]`` receives its own simplest trustworthy value.
+    """
+    element = shape.element
+    if element is None:
+        return None
+    baseline = baseline_for(element)
+    if baseline is None:
+        return None
+    if shape.kind is AnnotationKind.SET and baseline.literal_kind is LiteralKind.COLLECTION:
+        # A collection element is unhashable, so ``{[0]}`` is not valid Python.
+        return None
+
+    if action is SemanticActionKind.SINGLETON_COLLECTION:
+        note = f"singleton using the {element.description} baseline {baseline.value_text}"
+    else:
+        note = f"repeated {element.description} baseline {baseline.value_text}"
+
+    if shape.kind is AnnotationKind.SET:
+        return f"{{{baseline.value_text}}}", note
+    if action is SemanticActionKind.SINGLETON_COLLECTION:
+        if shape.kind is AnnotationKind.LIST:
+            return f"[{baseline.value_text}]", note
+        return f"({baseline.value_text},)", note
+    if shape.kind is AnnotationKind.LIST:
+        return f"[{baseline.value_text}, {baseline.value_text}]", note
+    return f"({baseline.value_text}, {baseline.value_text})", note
+
+
+def _dict_entry(action: SemanticActionKind, shape: StaticAnnotation) -> tuple[str, str] | None:
+    """Render a dict entry from known key and value baselines."""
+    if shape.key is None or shape.value is None:
+        return None
+    key = baseline_for(shape.key)
+    value = baseline_for(shape.value)
+    if key is None or value is None:
+        return None
+    if key.literal_kind is LiteralKind.COLLECTION:
+        return None
+    note = (
+        f"using {shape.key.description} key baseline {key.value_text} and "
+        f"{shape.value.description} value baseline {value.value_text}"
+    )
+    return f"{{{key.value_text}: {value.value_text}}}", note
+
+
+def _no_element_baseline(action: SemanticActionKind, shape: StaticAnnotation) -> Materialization:
+    """Report a container whose element type has no trustworthy value."""
+    return Materialization(
+        status=MaterializationStatus.UNSUPPORTED,
+        reason=(
+            f"no trustworthy element baseline for {shape.description}, so "
+            f"{action.value} cannot be written down; an unknown element type is "
+            "not treated as nullable"
+        ),
+    )
+
+
+def _not_a_collection(action: SemanticActionKind, shape: StaticAnnotation) -> Materialization:
+    """Report a non-container annotation asked for a collection action."""
+    return Materialization(
+        status=MaterializationStatus.UNSUPPORTED,
+        reason=f"{shape.description} is not a container",
+    )
+
+
 def _integer_neighbour(action: SemanticActionKind, reference: str) -> Materialization:
     """Exact integer neighbours, which are the only correct ones for ``int``."""
     value = parse_integer_literal(reference)
     if value is None:
-        return _unreadable(action, reference, "integer")
+        return _unreadable(reference, "integer")
     neighbour = _shift(action, value, -1, +1)
     if neighbour is None:
-        return _unreadable(action, reference, "integer")
+        return _unreadable(reference, "integer")
     return Materialization(
         status=MaterializationStatus.CONCRETE,
         reason=f"integer neighbour of literal {reference}",
@@ -226,7 +327,7 @@ def _float_neighbour(action: SemanticActionKind, reference: str) -> Materializat
     """Float neighbours via ``math.nextafter``, the adjacent representable value."""
     value = parse_float_literal(reference)
     if value is None:
-        return _unreadable(action, reference, "float")
+        return _unreadable(reference, "float")
     if action is SemanticActionKind.JUST_BELOW_BOUNDARY:
         neighbour = math.nextafter(value, -math.inf)
     elif action is SemanticActionKind.JUST_ABOVE_BOUNDARY:
@@ -268,7 +369,7 @@ def _shift(action: SemanticActionKind, value: int, below: int, above: int) -> in
     return value
 
 
-def _unreadable(action: SemanticActionKind, reference: str, kind: str) -> Materialization:
+def _unreadable(reference: str, kind: str) -> Materialization:
     """Report a literal that could not be parsed back into a number."""
     return Materialization(
         status=MaterializationStatus.UNSUPPORTED,

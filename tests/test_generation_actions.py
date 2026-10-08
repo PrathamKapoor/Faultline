@@ -11,16 +11,14 @@ from edgehunter.analysis.models import BoundaryKind
 from edgehunter.generation import (
     BOUNDARY_ACTIONS,
     ActionOrigin,
-    AnnotationCategory,
     MaterializationStatus,
     SemanticAction,
     SemanticActionKind,
     TargetActions,
-    classify_annotation,
     select_module_actions,
 )
 from edgehunter.generation.actions import required_parameters
-from edgehunter.scanner import ModuleAnalysis
+from edgehunter.scanner import AnnotationKind, ModuleAnalysis
 
 SOURCE = """def discount(amount: int, rate: float = 0.1):
     if amount <= 0:
@@ -36,11 +34,11 @@ def clamp(value: float, limit: float):
     return value
 
 
-def merge(items: list, index: dict):
+def merge(items: list[int], index: dict[str, int]):
     return items, index
 
 
-def unrecognized(flag, custom: Widget, nums: list[int], maybe: Optional[int]):
+def unrecognized(flag, custom: Widget, other: Widget):
     if flag:
         return 1
     return 2
@@ -138,9 +136,35 @@ def test_collection_annotations_drive_collection_actions(tmp_path: Path) -> None
     items = _values(actions["merge"], "items")
     index = _values(actions["merge"], "index")
     assert items[SemanticActionKind.EMPTY_COLLECTION] == "[]"
-    assert items[SemanticActionKind.SINGLETON_COLLECTION] == "[None]"
+    assert items[SemanticActionKind.SINGLETON_COLLECTION] == "[0]"
+    assert items[SemanticActionKind.DUPLICATE_ELEMENT_COLLECTION] == "[0, 0]"
     assert index[SemanticActionKind.EMPTY_COLLECTION] == "{}"
-    assert index[SemanticActionKind.SINGLETON_COLLECTION] == "{None: None}"
+    assert index[SemanticActionKind.SINGLETON_COLLECTION] == '{"": 0}'
+    assert SemanticActionKind.DUPLICATE_ELEMENT_COLLECTION not in index
+
+
+def test_bare_collection_gets_no_fabricated_singleton(tmp_path: Path) -> None:
+    """A bare ``list`` has no element shape, so only the empty value exists."""
+    actions = _actions(tmp_path, "def take(value: list):\n    return value\n")
+
+    values = _values(actions["take"], "value")
+    assert values[SemanticActionKind.EMPTY_COLLECTION] == "[]"
+    assert values[SemanticActionKind.SINGLETON_COLLECTION] is None
+    assert values[SemanticActionKind.DUPLICATE_ELEMENT_COLLECTION] is None
+
+
+def test_nullable_annotation_adds_the_none_action(tmp_path: Path) -> None:
+    actions = _actions(tmp_path, "def take(value: int | None):\n    return value\n")
+
+    values = _values(actions["take"], "value")
+    assert values[SemanticActionKind.SET_NONE] == "None"
+    assert values[SemanticActionKind.SET_ZERO] == "0"
+
+
+def test_non_nullable_annotation_has_no_none_action(tmp_path: Path) -> None:
+    actions = _actions(tmp_path, "def take(value: int):\n    return value\n")
+
+    assert SemanticActionKind.SET_NONE not in _values(actions["take"], "value")
 
 
 def test_collection_actions_come_from_the_annotation(tmp_path: Path) -> None:
@@ -172,20 +196,13 @@ def test_untyped_parameter_still_gets_relational_actions(tmp_path: Path) -> None
     }
 
 
-def test_unknown_annotations_stay_unknown() -> None:
-    assert classify_annotation(None) is AnnotationCategory.UNKNOWN
-    assert classify_annotation("Widget") is AnnotationCategory.UNKNOWN
-    assert classify_annotation("list[int]") is AnnotationCategory.UNKNOWN
-    assert classify_annotation("Optional[int]") is AnnotationCategory.UNKNOWN
-    assert classify_annotation("list") is AnnotationCategory.LIST
-
-
-def test_untyped_parameter_is_reported_as_unknown(tmp_path: Path) -> None:
-    actions = _actions(tmp_path)
-
-    assert all(
-        action.annotation_category is AnnotationCategory.UNKNOWN for action in actions["discount"]
+def test_untyped_parameter_has_an_unknown_shape(tmp_path: Path) -> None:
+    actions = _actions(
+        tmp_path,
+        "def take(value, other):\n    if value < other:\n        return value\n    return other\n",
     )
+
+    assert all(action.annotation.kind is AnnotationKind.UNKNOWN for action in actions["take"])
 
 
 def test_receiver_is_not_counted_as_a_required_parameter(tmp_path: Path) -> None:
@@ -238,7 +255,6 @@ def test_evidence_lines_are_recorded_for_boundary_actions(tmp_path: Path) -> Non
         ("tuple", "()"),
         ("dict", "{}"),
         ("set", "set()"),
-        ("frozenset", "frozenset()"),
     ],
 )
 def test_every_recognized_collection_has_an_empty_value(

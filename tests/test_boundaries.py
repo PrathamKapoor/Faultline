@@ -68,10 +68,37 @@ def test_unannotated_parameter_gets_no_generic_candidates(tmp_path: Path) -> Non
     assert semantics.boundaries == ()
 
 
-def test_complex_annotation_gets_no_generic_candidates(tmp_path: Path) -> None:
+def test_nullable_annotation_gets_generic_candidates(tmp_path: Path) -> None:
+    """Phase 5: ``Optional[int]`` is a nullable integer, so it keeps the int set."""
     source = "from typing import Optional\n\n\ndef f(x: Optional[int]):\n    ...\n"
 
     semantics = analyze(tmp_path, source)
+
+    kinds = {candidate.kind for entry in semantics.boundaries for candidate in entry.candidates}
+    assert kinds == {
+        BoundaryKind.ZERO,
+        BoundaryKind.ONE,
+        BoundaryKind.NEGATIVE_ONE,
+    }
+
+
+def test_pep604_nullable_annotation_gets_generic_candidates(tmp_path: Path) -> None:
+    semantics = analyze(tmp_path, "def f(x: int | None):\n    ...\n")
+
+    kinds = {candidate.kind for entry in semantics.boundaries for candidate in entry.candidates}
+    assert BoundaryKind.ZERO in kinds
+
+
+def test_unrecognized_annotation_gets_no_generic_candidates(tmp_path: Path) -> None:
+    semantics = analyze(
+        tmp_path, "class W:\n    ...\n\n\ndef f(x: W, y: 'W', z: Annotated[int, 'm']):\n    ...\n"
+    )
+
+    assert semantics.boundaries == ()
+
+
+def test_bool_annotation_is_not_numeric(tmp_path: Path) -> None:
+    semantics = analyze(tmp_path, "def f(x: bool):\n    ...\n")
 
     assert semantics.boundaries == ()
 

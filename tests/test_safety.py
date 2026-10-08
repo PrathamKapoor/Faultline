@@ -139,9 +139,9 @@ def test_materialized_values_are_source_text_not_executed_objects(tmp_path: Path
         "class Widget:\n"
         "    pass\n"
         "\n"
-        "def explode(items: list):\n"
+        "def explode(items: list[int], other: list[Widget]):\n"
         f"    Path({str(marker)!r}).write_text('bad')\n"
-        "    return items\n",
+        "    return items, other\n",
         encoding="utf-8",
     )
 
@@ -152,8 +152,10 @@ def test_materialized_values_are_source_text_not_executed_objects(tmp_path: Path
         for case in analysis.generation.cases
         if case.action.value_text is not None
     ]
-    assert values == ["[]", "[None]"]
+    # A known element type materializes; the unknown element type does not.
+    assert values == ["[]", "[0]", "[0, 0]", "[]"]
     assert all(isinstance(value, str) for value in values)
+    assert "[None]" not in values
     assert not marker.exists()
 
 
@@ -173,10 +175,14 @@ def test_unrecognized_annotations_never_trigger_construction(tmp_path: Path) -> 
     analysis = analyze_repository_full(tmp_path)
 
     assert not marker.exists()
-    # ``dict[str, int]`` is deliberately not recognized in this phase, so no
-    # collection value is guessed for it and no ``Widget`` is ever constructed.
-    assert analysis.generation.action_count == 0
-    assert analysis.generation.case_count == 0
+    # ``dict[str, int]`` is now recognized, so the payload contributes an empty
+    # and a singleton dict. No ``Widget`` is ever constructed, and the unknown
+    # ``widget`` parameter simply stays missing.
+    assert analysis.generation.action_count == 2
+    assert analysis.generation.case_count == 2
+    for case in analysis.generation.cases:
+        assert case.parameter == "payload"
+        assert case.missing_parameters == ("widget",)
 
 
 def _call_name(func: ast.expr) -> str | None:
