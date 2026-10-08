@@ -97,7 +97,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-009: Split scanner analysis into models.py, targets.py, and ast_parser.py; add `analyze_repository()`
 
-- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), 82d42f3
 - Context: Phase 1 requires structural facts (functions, classes, methods, parameters, annotations, decorators, line spans) from every discovered Python file without executing it. Phase 0 had a single `repository.py` whose only responsibility was filesystem discovery.
 - Decision: Add three modules under `src/edgehunter/scanner/`: `models.py` (frozen dataclasses and enums), `targets.py` (AST to classes/callables), `ast_parser.py` (safe source read + `ast.parse` + issue capture). Add `RepositoryAnalysis` and `analyze_repository()` to `repository.py`. `ScanSummary` and `scan_repository()` keep their Phase 0 signatures and behavior unchanged; `RepositoryAnalysis` composes a `ScanSummary` (`discovery`) with a tuple of `ModuleAnalysis` and adds derived counters.
 - Why: The responsibilities differ (data structures, AST traversal, file-level analysis, repository orchestration), and the phase's recommended structure matches this split. Keeping `scan_repository()` untouched preserves every Phase 0 test and any external caller; new capability is purely additive.
@@ -107,7 +107,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-010: Target model and scope-aware classification rules
 
-- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), 82d42f3
 - Context: Later phases need to distinguish functions, async functions, methods, async methods, and nested definitions, with deterministic source-local names and reproducible ordering.
 - Decision: `FunctionInfo` records `name`, `qualified_name`, `TargetKind` (six values), `lineno`/`end_lineno`, `is_async`, `owner`, `parameters`, `return_annotation`, and `decorators`. Classification uses the *immediate lexical scope*: directly inside a class body it is a method; directly inside a function body it is a nested function; at module scope it is a function; async variants are selected when the definition is `async def`. "Directly" ignores compound statements (`if`/`try`/loops/`with`/`match`), which do not change scope. `qualified_name` joins lexical names with dots (`Outer.Inner.run`, `outer.inner`). `owner` is set only for direct methods (the dotted class path); nested functions have no owner. Functions inside one module are flattened into a single tuple sorted by `(lineno, qualified_name)`; classes are sorted the same way. `ModuleAnalysis.functions` contains all callables (including methods and nested functions); `ClassInfo` does not duplicate them.
 - Why: The classification rule is deterministic, easy to explain, and matches how Python name binding works lexically. `(lineno, qualified_name)` sorting makes output stable even if the AST traversal order ever changes. Flattening avoids duplicating method objects inside `ClassInfo` while `owner` keeps the class link.
@@ -117,7 +117,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-011: Read Python source with `tokenize.open` (PEP 263 encoding detection)
 
-- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), 82d42f3
 - Context: Python source files are not guaranteed to be UTF-8; they may declare an encoding with a coding cookie or a BOM. Reading with a hard-coded encoding would mislabel valid files as broken.
 - Decision: `_read_source()` in `ast_parser.py` uses `tokenize.open(path)`, which implements Python's own source encoding rules (BOM and PEP 263 coding cookies), then returns the decoded text. Decoding failures (`UnicodeDecodeError`), unreadable files (`OSError`), and unknown/invalid declared encodings (`SyntaxError` from `tokenize`) become a structured `ReadIssue`; they are never mislabeled as syntax errors.
 - Why: `tokenize.open` applies exactly the rules the Python interpreter uses to read source, without executing anything, and closing is handled by the context manager. It requires only the standard library.
@@ -127,7 +127,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-012: Separate `SyntaxIssue` and `ReadIssue`; one bad file never aborts the scan
 
-- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), 82d42f3
 - Context: A repository may contain unparseable or unreadable files. The phase requires these to be visible, structured, and unable to crash the whole scan, and encoding/read failures must not be reported as syntax errors.
 - Decision: `ModuleAnalysis` carries at most one of `syntax_issue: SyntaxIssue | None` (line, column, message taken from `ast.parse`'s `SyntaxError`: `lineno`, `offset`, `msg`) and `read_issue: ReadIssue | None` (message from the read/decode exception). Both yield a normal `ModuleAnalysis` with empty targets; analysis continues with the remaining files. `is_parsed` is true only when both are `None`.
 - Why: Distinguishing the two failure modes lets the CLI report them honestly in separate sections, and per-file result objects keep the repository loop free of exception control flow. `ast.parse`'s `msg` is used instead of `str(exc)` because the latter embeds filename/line text.
@@ -137,7 +137,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-013: CLI `scan` reports AST statistics, supports `--targets`, and adds exit code 1
 
-- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), 82d42f3
 - Context: `edgehunter scan` previously printed discovery counts plus a notice that analysis was not implemented. Phase 1 makes analysis real, so the output and exit-code contract must reflect it. D-005 established 0 = success and 2 = invalid input but said nothing about completed scans with unparseable files.
 - Decision: `scan` now calls `analyze_repository()` and prints discovered/parsed/syntax-issue/read-issue counts, class/function/method/async/callable-target counts, and (for directories) excluded-directory count. It prints `Syntax issues` and `Read issues` sections when present. A new `--targets` option lists every callable target as `relative/path.py:line` plus its static signature (`signature` property on `FunctionInfo`, defaults rendered as `...`). Exit codes: 0 = all discovered files parsed, 1 = scan completed with at least one syntax or read issue (`EXIT_SCAN_ISSUES`), 2 = invalid input (`EXIT_INVALID_INPUT`, unchanged). Invalid paths/unsupported targets still print `error: ...` to stderr with no traceback.
 - Why: The phase requires visible syntax failures, deliberate exit codes, and a target listing. Exit 1 gives scripts a way to detect incomplete analysis without conflating it with bad user input (2) or success (0), extending D-005 rather than reversing it.
@@ -147,7 +147,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-014: AST analysis uses only the standard library; no third-party parser dependency
 
-- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), uncommitted
+- Date / phase / commit: 2026-10-08, Phase 1 (Repository Scanner + Safe AST Extraction), 82d42f3
 - Context: Phase 1 needs to parse arbitrary Python 3 source and extract syntax facts. The phase allows a third-party AST dependency only with a demonstrated need the standard library cannot satisfy.
 - Decision: Use the standard library only: `ast` for parsing and `ast.unparse` for rendering annotations/decorators/bases, `tokenize` for encoding detection. No new runtime dependencies were added.
 - Why: `ast.parse` accepts every syntax the running interpreter accepts and never imports analyzed modules. `ast.unparse` round-trips the expressions needed here. Both are guaranteed present, fast enough, and keep the dependency surface at `typer` only (Phase 0).
