@@ -2,91 +2,61 @@
 
 ## 1. Current Phase
 
-- **Phase:** Phase 1 — Repository Scanner + Safe AST Extraction
+- **Phase:** Phase 2 — Static Semantic Analysis + Deterministic Boundary Mining
 - **Subphase:** none (single-session phase)
-- **Objective:** Extend the Phase 0 scanner so `edgehunter scan` discovers Python files, parses them safely with `ast.parse`, extracts modules/classes/functions/methods/parameters/annotations/decorators/line spans, reports syntax and read failures without crashing, and lists targets — without ever importing or executing target code.
+- **Objective:** Extract branch predicates, comparisons, constants, and simple arithmetic relationships from Python functions, then deterministically derive symbolic boundary candidates — with no AI, no execution, and no property or bug claims.
 - **Status:** complete
 
-Repository state at handoff: branch `main`, no remote configured. Implementation commit `82d42f3bee8458090e22bd6e1bfc81813b01ff7c` (`82d42f3`, "Add safe AST extraction to repository scanning"), followed by documentation metadata commits (see `git log`). All Phase 0 code and tests remain intact.
+Repository state at handoff: branch `main`, no remote configured. Implementation commit `b538557adcda0570aa0b2d0b089ccb6a0a4bd399` (`b538557`, "Add static semantic analysis and deterministic boundary mining"), followed by documentation metadata commits (see `git log`). Version remains `0.1.0`; no bump was made (D-002 makes the version literal the single source, and no decision requires a bump).
 
 ## 2. Work Completed
 
-The repository already had a working Phase 0 foundation (discovery-only scanner, Typer CLI, 18 tests). This session added:
+The repository had a green Phase 0/1 baseline (discovery + structural AST extraction, 52 tests). This session added:
 
-- Immutable analysis models in `scanner/models.py`: `ParameterKind`, `TargetKind`, `ParameterInfo`, `FunctionInfo`, `ClassInfo`, `SyntaxIssue`, `ReadIssue`, `ModuleAnalysis`, plus `METHOD_KINDS` and signature rendering.
-- Scope-aware AST extraction in `scanner/targets.py`: recursive walk that classifies definitions by immediate lexical scope, builds dotted qualified names, extracts parameter kinds/defaults/annotations, return annotations, decorators, class bases, and line spans. Functions/classes are sorted by `(lineno, qualified_name)`.
-- Safe file analysis in `scanner/ast_parser.py`: `tokenize.open` for PEP 263/BOM-aware reading, `ast.parse` for parsing, and structured `ReadIssue`/`SyntaxIssue` results instead of exceptions.
-- Repository aggregation in `scanner/repository.py`: `RepositoryAnalysis` (composes the unchanged `ScanSummary` plus `modules`) with derived counters (`parsed_file_count`, `syntax_issue_count`, `read_issue_count`, `issue_count`, `function_count`, `method_count`, `async_target_count`, `callable_target_count`, `class_count`) and `analyze_repository()`.
-- CLI changes in `cli.py`: real statistics output, `Syntax issues` / `Read issues` sections, `--targets` listing with static signatures, and exit code 1 for completed scans with issues (0 clean, 2 invalid input unchanged).
-- 34 new tests (18 -> 52): parser extraction tests, no-execution safety tests (runtime side-effect marker plus a static scan for forbidden call names), repository aggregation/determinism tests, and updated CLI tests.
-- Documentation: README rewritten for real Phase 1 behavior; decisions D-009..D-014 added; `flow.md` updated (command tree, scan flow, analysis rules, diagram, session table).
+- **Single-parse scanner refactor** (`src/edgehunter/scanner/`): `SourceFile` (holds the parsed `ast.Module` or a structured issue), `parse_source_file()`, `build_module_analysis()`, `CallableNode` + `collect_callable_nodes()`, and a new shared `rendering.py` holding `render_source()`. `analyze_python_file()` remains as the Phase 1 wrapper; all 52 Phase 1 tests passed unchanged right after the refactor.
+- **New `analysis` package** (`src/edgehunter/analysis/`):
+  - `models.py`: `ExpressionKind`, `ComparisonOperator`, `ArithmeticOperator`, `ArithmeticContext`, `PredicateKind`, `ConstantKind`, `ExpressionInfo`, `ComparisonInfo`, `PredicateInfo`, `ArithmeticInfo`, `ConstantInfo`, `TargetSemantics`, `BoundaryKind`, `BoundaryOrigin`, `BoundaryCandidate` (with `description`), `TargetBoundaries`, `ModuleSemantics`, `BOUNDARY_KIND_ORDER`.
+  - `semantics.py`: `extract_module_semantics()` + `_FactCollector`.
+  - `boundaries.py`: `mine_target_boundaries()`, `mine_module_boundaries()`.
+  - `repository.py`: `RepositorySemantics` and `analyze_repository_semantics()`.
+- **CLI**: semantic statistics block in the default summary, new `--boundaries` view, structural counts read from `analysis.structure`. Exit codes unchanged (0/1/2). No `--semantics` switch was added (D-019).
+- **Tests**: 113 total (was 52). New: `tests/test_semantics.py` (24), `tests/test_boundaries.py` (24), `tests/test_semantic_repository.py` (9), plus semantic no-execution test and CLI additions; `tests/test_cli.py` gained 4 tests and one help assertion; `tests/test_safety.py` gained a hostile-source semantic test and `literal_eval` in the forbidden-call set.
+- **Docs**: decisions D-015..D-020 appended; `flow.md` sections 2/4/7/8/9 updated plus a Phase 2 table; README status/usage/architecture/roadmap rewritten with verified output.
 
 Non-obvious behavior worth knowing:
 
-- Classification ignores compound statements: a `def` inside `if`/`try`/loops/`with`/`match` inherits the nearest lexical scope (module/class/function).
-- `owner` is set only for direct methods; nested functions have `owner=None` even when nested inside a method.
-- "Functions" in the CLI output includes nested functions; methods are counted separately. Callable targets = functions + methods.
-- Discovery ordering is Phase 0 behavior: a directory's files (sorted) come before its subdirectories. Relative paths are displayed with `as_posix()`.
-- Defaults are never evaluated; only `has_default` is recorded, and signatures render defaults as `...`.
-- A file can have at most one issue: `SyntaxIssue` or `ReadIssue`, never both, and never mislabeled.
+- Each file is read and parsed exactly once per scan; the same AST feeds structural and semantic extraction (`test_each_source_file_is_read_once` monkeypatches `_read_source` to count reads).
+- Semantic facts use the scanner's own `collect_callable_nodes()`, so qualified names cannot drift between structure and semantics.
+- Comparisons come only from predicates (`if`/`while`/`assert`); comparison facts inside boolean operands are included; chained comparisons are decomposed into adjacent pairs.
+- Arithmetic is recorded as **maximal** subexpressions: `(x + y) * 2` is one `ArithmeticInfo` with operators `(*, +)`, so counts are not double-counted.
+- `...` (Ellipsis) is not recorded as a constant (stub placeholder); `bool` is classified before `int`.
+- Boundary references are symbolic; the safe-reference rule is AST-based (`self.limit` yes; `f().x`, `items[i]` no).
+- Scanning EdgeHunter's own source yields only 6 boundary candidates because almost nothing is annotated exactly `int`/`float` — the conservative rule working as designed.
 
 ## 3. Files Changed
 
 All paths relative to the repository root.
 
 ```text
-src/edgehunter/scanner/models.py            NEW
-  Frozen dataclasses/enums for parameters, targets, classes, modules, issues;
-  render_parameters() and FunctionInfo.signature for static display.
-
-src/edgehunter/scanner/targets.py           NEW
-  extract_module_targets(); _visit/_build_function/_build_class/_extract_parameters;
-  _render_expression wraps ast.unparse with an "<unparseable>" fallback.
-
-src/edgehunter/scanner/ast_parser.py        NEW
-  analyze_python_file(path, relative_path); _read_source() via tokenize.open;
-  maps read errors and SyntaxError to structured issues.
-
-src/edgehunter/scanner/repository.py        MODIFIED
-  Added RepositoryAnalysis and analyze_repository(); ScanSummary and
-  scan_repository() unchanged. Imports models/ast_parser.
-
-src/edgehunter/scanner/__init__.py          MODIFIED
-  Re-exports the new models, analyze_python_file, analyze_repository,
-  RepositoryAnalysis (existing Phase 0 exports kept).
-
-src/edgehunter/cli.py                       MODIFIED
-  scan() now calls analyze_repository(); _print_analysis/_print_issues/
-  _print_targets/_format_location; --targets option; EXIT_SCAN_ISSUES = 1.
-
-tests/test_ast_parser.py                    NEW
-  18 tests: functions/async/methods/nested/nested classes, parameter kinds,
-  defaults (incl. 1/0 not evaluated), annotations, decorators, class metadata,
-  syntax error capture, empty/comment-only files, read issues, compound
-  statements, class-in-function, lambdas ignored.
-
-tests/test_safety.py                        NEW
-  Runtime test proving module-level side effects never execute; static test
-  asserting no eval/exec/__import__/import_module/run_path calls in the package.
-
-tests/test_repository_analysis.py           NEW
-  Aggregation, kind statistics, deterministic ordering (files before subdirs),
-  single-file target, syntax/read aggregation, excluded dirs, empty directory.
-
-tests/test_cli.py                           MODIFIED
-  Updated two Phase 0 scan tests for the new output; added stat helper and
-  tests for statistics, --targets, issue sections, exit code 1.
-
-README.md                                   MODIFIED
-  Status/usage/architecture/roadmap updated; verified real scan output included.
-
-decisions.md                                MODIFIED
-  Appended D-009..D-014.
-
-flow.md                                     MODIFIED
-  Sections 2/4/6/7 updated; Phase 1 changes table appended (Phase 0 table kept).
-
-handoff.md                                  REWRITTEN (this file)
+src/edgehunter/analysis/__init__.py          NEW   public analysis interface
+src/edgehunter/analysis/models.py            NEW   semantic + boundary immutable models and enums
+src/edgehunter/analysis/semantics.py         NEW   AST -> predicates/comparisons/constants/arithmetic
+src/edgehunter/analysis/boundaries.py        NEW   facts + parameters -> boundary candidates
+src/edgehunter/analysis/repository.py        NEW   analyze_repository_semantics (single read/parse per file)
+src/edgehunter/scanner/rendering.py          NEW   shared render_source() (ast.unparse + fallback)
+src/edgehunter/scanner/ast_parser.py         MODIFIED  SourceFile, parse_source_file, build_module_analysis
+src/edgehunter/scanner/targets.py            MODIFIED  CallableNode, collect_callable_nodes, shared rendering
+src/edgehunter/scanner/__init__.py           MODIFIED  exports new pipeline pieces
+src/edgehunter/cli.py                        MODIFIED  semantic stats, --boundaries, structural counts from .structure
+tests/test_semantics.py                      NEW   24 semantic extraction tests (A-N and scope/literal cases)
+tests/test_boundaries.py                     NEW   24 boundary mining tests (O-V, conservative refs)
+tests/test_semantic_repository.py            NEW   9 aggregation/determinism/single-read tests
+tests/test_safety.py                         MODIFIED  hostile-source semantic test; literal_eval forbidden
+tests/test_cli.py                            MODIFIED  semantic stats + --boundaries tests
+README.md                                    MODIFIED  status/usage/architecture/roadmap with verified output
+decisions.md                                 MODIFIED  appended D-015..D-020
+flow.md                                      MODIFIED  scan flow, new semantic/boundary rules, diagram, Phase 2 table
+handoff.md                                   REWRITTEN (this file)
 ```
 
 ## 4. Current Architecture / State
@@ -95,141 +65,157 @@ handoff.md                                  REWRITTEN (this file)
 src/edgehunter/
 ├── __init__.py        version literal only
 ├── __main__.py        python -m edgehunter -> cli.main()
-├── cli.py             Typer app; presentation only (parses input, prints output)
-└── scanner/
+├── cli.py             Typer app; presentation only
+├── scanner/           structural layer (what exists)
+│   ├── __init__.py    public interface
+│   ├── repository.py  discovery (os.walk + pruning) + RepositoryAnalysis
+│   ├── ast_parser.py  SourceFile / parse_source_file / build_module_analysis
+│   ├── targets.py     collect_callable_nodes + CallableNode (scope-aware)
+│   ├── models.py      immutable structural models
+│   └── rendering.py   render_source()
+└── analysis/          semantic layer (what the code cares about)
     ├── __init__.py    public interface
-    ├── repository.py  discovery (os.walk + pruning) + RepositoryAnalysis/analyze_repository
-    ├── models.py      immutable analysis models
-    ├── targets.py     AST -> FunctionInfo/ClassInfo (scope-aware)
-    └── ast_parser.py  safe read + ast.parse + issue capture
+    ├── repository.py  analyze_repository_semantics / RepositorySemantics
+    ├── semantics.py   extract_module_semantics / _FactCollector
+    ├── boundaries.py  mine_target_boundaries / mine_module_boundaries
+    └── models.py      immutable semantic + boundary models
 ```
 
-Call chain: `edgehunter` or `python -m edgehunter` -> `cli.main()` -> `scan()` -> `analyze_repository()` -> `scan_repository()` (discovery) -> `analyze_python_file()` per file -> `_read_source()` + `ast.parse()` + `extract_module_targets()` -> `ModuleAnalysis` tuple -> `RepositoryAnalysis` -> `_print_analysis()` (+ `_print_issues()`, `_print_targets()`).
+Call chain: `cli.scan()` -> `analyze_repository_semantics()` -> `scan_repository()` (discovery) -> per file `parse_source_file()` (read + parse once) -> `build_module_analysis()` (structure) and `extract_module_semantics()` (facts + `mine_module_boundaries()`) -> `RepositorySemantics` -> `_print_analysis()` (+ `_print_issues`, `_print_targets`, `_print_boundaries`).
 
 Data at rest: none. Output to stdout; errors to stderr. No state between runs.
 
-Safety boundary: only `ast_parser._read_source` (text read via `tokenize.open`) and `ast.parse` touch target content. No imports, `eval`, `exec`, subprocess, or compilation of target code anywhere. `tests/test_safety.py` locks this down.
+Safety boundary: `analysis` reads text and walks ASTs only; no imports, `eval`/`exec`/`literal_eval`/`__import__`/`import_module`/`run_path`, or subprocess. `tests/test_safety.py` enforces it over the whole package.
 
-Determinism: discovery is sorted (files before subdirectories, each sorted); within a module, functions/classes sort by `(lineno, qualified_name)`. `analyze_repository()` results are equal across repeated runs on unchanged files (asserted in tests).
+Determinism: files in discovery order; targets and facts sorted; candidates sorted by `(parameter, kind rank, reference)` and deduplicated by `(parameter, kind, reference)` with sorted evidence. Repeated scans are equal (asserted).
 
 ## 5. Decisions Made
 
-- **D-009** — Split analysis into `models.py`/`targets.py`/`ast_parser.py`; add `RepositoryAnalysis` + `analyze_repository()`; `ScanSummary`/`scan_repository()` unchanged.
-- **D-010** — Target model and scope-aware classification; qualified names; `owner` only for direct methods; flattened function list sorted by `(lineno, qualified_name)`.
-- **D-011** — `tokenize.open` for PEP 263/BOM-aware source reading; read failures are structured and never mislabeled as syntax errors.
-- **D-012** — Separate `SyntaxIssue`/`ReadIssue`; one bad file never aborts the scan; Python's own error messages preserved.
-- **D-013** — CLI stats + `--targets` + exit code 1 for completed scans with issues; extends D-005 (0/2 meanings unchanged); two Phase 0 CLI tests updated.
-- **D-014** — Standard library only for parsing (`ast`, `tokenize`); no new runtime dependency; astroid/LibCST/parso/tree-sitter rejected.
+- **D-015** — `analysis` layer + single-parse split (`SourceFile`, `parse_source_file`, `build_module_analysis`, `collect_callable_nodes`, `scanner/rendering.py`); `analysis` depends on `scanner`, never the reverse; no new dependency.
+- **D-016** — Semantic extraction rules: predicates from `if`/`while`/`assert`; comparisons in boolean operands; chained decomposition; `bool` before `int`; `...` skipped; signed literals via explicit helper; maximal arithmetic only; no folding; scope stop at nested defs/classes/lambdas.
+- **D-017** — Boundary vocabulary and derivation: inequality -> below/at/above; equality -> at; identity/membership -> none; generic numeric only for literal `int`/`float` annotations on positional/keyword-only params; symbolic references; `origin`/`reason`/evidence recorded.
+- **D-018** — Normalization and conservative rules: parameter-subject normalization with the exact inversion table (never invert `is`/`in`); left side wins when both are parameters; safe-reference rule from the AST; dedup key; `(parameter, kind rank, reference)` ordering.
+- **D-019** — CLI semantic statistics and `--boundaries`; exit codes unchanged; no `--semantics` switch.
+- **D-020** — Deliberately unsupported semantics recorded as limitations (comprehension filters, lambdas, `match`/`case`, `try`/`except` flow, conditional expressions, class/module-level conditions, non-`int`/`float` annotations, bitwise aug-assign).
 
 ## 6. Requirements and Constraints
 
 - **Python:** `requires-python = ">=3.10"`; only 3.13.14 exercised. No upper bound.
-- **Dependencies:** runtime `typer>=0.12` only; dev extra `pytest>=8`, `ruff>=0.6`, `mypy>=1.10`. D-014 forbids third-party parser dependencies without a new decision.
-- **Safety invariant:** never import or execute analyzed code in the scanner; Phase 2+ analysis must stay static. Future execution belongs to an isolated subsystem (not built).
-- **Determinism:** new output must be stably ordered; do not introduce set/dict iteration order into user-visible results.
-- **Models:** frozen dataclasses + slots; enums are `str`-mixin for readable values; analysis stores source text, never runtime objects; no evaluation of annotations/defaults.
-- **CLI:** 0 = clean scan, 1 = completed with issues, 2 = invalid input; user errors print `error: ...` to stderr without tracebacks; library modules do not print.
+- **Dependencies:** runtime `typer>=0.12` only; dev extra `pytest>=8`, `ruff>=0.6`, `mypy>=1.10`. No new dependency this phase; D-014 forbids third-party parsers/solvers without a new decision.
+- **Safety invariant:** never import or execute analyzed code; annotations are matched as text, never resolved; no `eval`/`literal_eval`.
+- **Determinism:** semantic facts and boundary candidates must be stably ordered; sort keys must be explicit (D-016/D-018).
+- **Models:** frozen dataclasses + slots; `str`-mixin enums; source text only; no runtime values.
+- **CLI:** 0 = clean scan, 1 = completed with syntax/read issues, 2 = invalid input; library modules do not print; a bug in semantic analysis must never be converted into a source issue.
+- **Language discipline:** boundary candidates are "candidates"/"regions"/"evidence" — never "bugs"/"vulnerabilities"; an `assert` predicate is syntax, not an inferred property.
 - **Documentation process:** read `decisions.md`, `flow.md`, `handoff.md` first; append decisions (never edit old entries except commit-hash metadata); update `flow.md` with real names; rewrite `handoff.md` at session end.
 - **Authorship:** commits only as `PrathamKapoor <prathamkapoor027@gmail.com>`; no attribution lines; never commit `paper/`, `research/`, `*.tex`.
-- **Scope discipline:** do not implement Phase 2+ features (branch analysis, boundary mining, property inference, execution, oracles, models) without the corresponding phase instruction.
+- **Scope discipline:** do not implement Phase 3 features (risk scoring, property/oracle mining, test generation, execution, models) without the corresponding phase instruction.
 
 ## 7. Testing and Verification
 
-Commands actually executed and their final results:
+Baseline (before any change) and final results of the project's real commands:
 
 ```text
 .venv\Scripts\python.exe -m pytest -q
-  -> 52 passed in 5.53s
+  baseline -> 52 passed in 4.37s
+  final    -> 113 passed in 3.23s
 
 .venv\Scripts\python.exe -m ruff check .
-  -> All checks passed!
+  baseline -> All checks passed!
+  final    -> All checks passed!
 
 .venv\Scripts\python.exe -m ruff format --check .
-  -> 17 files already formatted (13 Python + 4 Markdown; ruff also formats Python fences in Markdown)
+  baseline -> 17 files already formatted
+  final    -> 26 files already formatted
 
 .venv\Scripts\python.exe -m mypy
-  -> Success: no issues found in 13 source files
+  baseline -> Success: no issues found in 13 source files
+  final    -> Success: no issues found in 22 source files
 ```
 
-During development, the first full run was `2 failed, 50 passed`; both failures were incorrect test expectations (I had mis-counted `Account.outer` as a non-method, and assumed globally sorted paths instead of Phase 0's files-before-subdirectories order). The tests were corrected; production code was not changed for those failures.
+During development, two check failures were real and fixed:
+- `ruff check` and `mypy` flagged `origin`/`parameter` scope and loop-variable shadowing in `boundaries.py` and an un-narrowed `node` in `semantics.py`; all fixed without weakening typing.
+- Two test expectations were wrong (not the code): a miscounted candidate total in `test_semantic_repository.py`-style accounting (17 vs 9 in `test_scan_reports_semantic_statistics`) and a missing generic-candidate expectation in `test_parameter_to_parameter_boundary_stays_symbolic`.
+- `ruff format` reformatted 11 files (line wrapping and multi-line string collapse); no behavior changed.
 
 CLI verified manually (installed console script and module entry point):
 
 ```text
-.venv\Scripts\edgehunter.exe --version                 -> "edgehunter 0.1.0", exit 0
-.venv\Scripts\python.exe -m edgehunter --version       -> "edgehunter 0.1.0", exit 0
-.venv\Scripts\edgehunter.exe scan .\does-not-exist     -> "error: path does not exist: does-not-exist", exit 2
-.venv\Scripts\edgehunter.exe scan <temp demo>          -> 3 files, 2 parsed, 1 syntax issue, 8 callable targets, exit 1
-.venv\Scripts\edgehunter.exe scan <temp demo> --targets-> target listing with path:line and static signatures, exit 1
-.venv\Scripts\edgehunter.exe scan .                    -> 13 files, 13 parsed, 14 classes, 81 functions, 19 methods,
-                                                          100 callable targets, 9 excluded dirs, exit 0
+.venv\Scripts\edgehunter.exe --version                  -> "edgehunter 0.1.0", exit 0
+.venv\Scripts\python.exe -m edgehunter --version        -> "edgehunter 0.1.0", exit 0
+.venv\Scripts\edgehunter.exe scan --help                 -> lists PATH, --targets, --boundaries, exit 0
+.venv\Scripts\edgehunter.exe scan .                      -> 22 files, 465 predicates, 408 comparisons,
+                                                            88 arithmetic, 6 boundary candidates, exit 0
+.venv\Scripts\edgehunter.exe scan . --targets            -> target listing unchanged, exit 0
+.venv\Scripts\edgehunter.exe scan . --boundaries         -> Boundary sections, exit 0
+.venv\Scripts\edgehunter.exe scan .\nope                 -> "error: path does not exist: nope", exit 2
+.venv\Scripts\edgehunter.exe scan <temp demo>            -> Account.withdraw: [comparison] just below/at/just above
+                                                            self.balance + [numeric] NaN/+Infinity; exit 0
 ```
 
-The temp demo contained `app/account.py`, `app/api.py`, and `broken.py` (`def broken(`); the CLI reported `broken.py:1:11` / `'(' was never closed` and still listed all targets from the other files. The demo lives under the OS temp directory, not the repository.
-
-README scan output (`13 files ... 100 callable targets`) was re-verified against a fresh run after all test files existed.
+The temp demo was `C:\Users\LENOVO\AppData\Local\Temp\opencode\eh_phase2_demo\bank.py` (outside the repository). README scan output was re-verified against a fresh run after all test files existed.
 
 Not tested:
 
 - Python 3.10, 3.11, 3.12 (only 3.13.14 present).
 - POSIX filesystems (path display, symlinks, permissions).
-- Permission-denied files and directories; unreadable subdirectory behavior (still Phase 0 `os.walk` default).
-- Pathologically deep source nesting (`RecursionError` from `ast.parse` is not caught).
+- Permission-denied files/dirs; unreadable subdirectory behavior (still Phase 0 `os.walk` default).
+- Pathologically deep source nesting (`RecursionError` from `ast.parse`; unchanged known issue).
 - Very large repositories (no performance measurements).
-- Encoding cases beyond UTF-8, UTF-8-with-cookie, ascii-declared-with-non-ascii, and unknown cookie.
+- Encodings beyond the Phase 1 cases.
 
 ## 8. Known Issues / Risks
 
 **Confirmed:**
 
-- None blocking. All executed checks pass.
+- None blocking. All executed checks pass; no `RecursionError` path was exercised.
 
 **Possible:**
 
-- `ast.parse` on pathologically nested source can raise `RecursionError`, which would abort the repository scan (uncaught). Untested; considered acceptable for now.
-- Class definition keywords (for example `class C(Base, metaclass=ABCMeta)`) are not captured; only `ClassInfo.bases` (positional base expressions) are stored.
-- Decorators/annotations/bases are `ast.unparse` output, so quote style and formatting are normalized (for example `router.get('/users')`), not the original source text.
-- `.PY` uppercase suffix remains excluded (D-004, case-sensitive by design).
-- `os.walk` still silently skips unreadable subdirectories (Phase 0 known issue, unchanged per session scope).
-- The analysis grammar matches the running interpreter: syntax newer than Python 3.13 is reported as a syntax issue.
+- Pathological nesting can still raise `RecursionError` in `ast.parse` (unchanged from Phase 1).
+- Comparisons outside predicates (e.g. `y = x > 3`) are not recorded as comparisons by design (D-016 consequences).
+- Class-definition keywords (`metaclass=`) are still not captured (Phase 1 issue).
+- `.PY` uppercase suffix excluded; `os.walk` silently skips unreadable subdirectories (both unchanged).
 - Help output is rich-formatted and version-dependent; tests assert substrings only.
-- No `LICENSE`, no CI, no remote; README still contains a `<repository-url>` placeholder.
+- No `LICENSE`, no CI, no remote; README still has a `<repository-url>` placeholder.
 - LF->CRLF warnings on `git add` are expected on Windows (no `.gitattributes`).
 
 ## 9. Unfinished Work
 
-Nothing from Phase 1 is unfinished. All required behaviors, tests, and documentation were implemented and verified.
+Nothing from Phase 2 is unfinished. All required behaviors, tests, and documentation were implemented and verified.
 
-Intentionally absent (later phases): control-flow/branch analysis, boundary mining, risk scoring, property extraction, assertion/docstring mining, semantic action engine, hypothesis generation, LLM integration, training, RAG/vector stores, failure retrieval, Docker/sandbox execution, oracle scoring, counterexample shrinking, severity ranking, CI, API/UI, IDE plugin, multi-language support.
+Intentionally absent (later phases): risk scoring, target prioritization, property/oracle extraction (assertions, docstrings, test expectations), metamorphic/property candidates, semantic action engine, test generation, mutation testing, LLM integration, training, RAG/vector stores, failure retrieval, Docker/sandbox execution, counterexample shrinking, severity ranking, CI, API/UI, IDE plugin, multi-language parsing.
 
 ## 10. Next Subphase
 
-**Phase 2 — Static Semantic Analysis + Boundary Mining** (per project plan).
+**Phase 3 — Risk Scoring + Oracle / Property Mining** (per project plan).
 
-Expected direction: comparisons, numeric constants, branch predicates, arithmetic relationships, simple data-flow relationships, and deterministic boundary-candidate generation — still entirely static, building on `RepositoryAnalysis.modules` and the target/parameter models. No execution, no model integration.
+Expected direction: extract explicit assertions, validation conditions, docstring claims, and existing test expectations; classify oracle strength; define risk features and target prioritization — building on `TargetSemantics` and `BoundaryCandidate`. Still static; no execution and no models unless a later phase says so.
 
 ## 11. Critical Context
 
 - **Project venv:** `.venv/` (gitignored). Interpreter `.venv\Scripts\python.exe`; installed: edgehunter 0.1.0 (editable), typer 0.27.3 (vendors click as `typer._click`; `import click` fails), rich 15.0.0, pytest 9.1.1, ruff 0.16.10, mypy 2.4.0, Python 3.13.14.
 - **Do not `import click`** in code or tests; use `typer.testing.CliRunner`/`Result` (D-008).
-- **Version single source:** `src/edgehunter/__init__.py` literal `__version__ = "0.1.0"`; unchanged this phase (no automatic bump).
-- **Exit codes:** `EXIT_SCAN_ISSUES = 1`, `EXIT_INVALID_INPUT = 2` in `cli.py`; 0 implied by normal return.
-- **Ordering rule:** discovery is files-before-subdirectories (sorted within each directory); do not "fix" this into global lexicographic order without a decision — Phase 0 tests and README depend on the current contract.
-- **Test helper:** `tests/test_cli.py::stat_value(output, label)` parses aligned stat lines; reuse it for new CLI stats instead of fragile full-line assertions.
-- **Safety tests must keep passing:** `tests/test_safety.py::test_module_level_side_effects_are_never_executed` and `test_package_source_contains_no_execution_primitives` are the enforcement of the hard invariant.
-- **Ruff formats Markdown Python fences:** `ruff format --check .` counts README/decisions/flow/handoff; fenced ```` ```python ```` blocks will be reformatted.
-- **Git identity:** repo-local `PrathamKapoor` / `prathamkapoor027@gmail.com`; no remote. Commit hashes for this phase: `82d42f3` (implementation) plus documentation commits.
+- **Version single source:** `src/edgehunter/__init__.py` literal `__version__ = "0.1.0"`; unchanged this phase.
+- **Exit codes:** `EXIT_SCAN_ISSUES = 1`, `EXIT_INVALID_INPUT = 2` in `cli.py`; semantic bugs must not be masked as source issues.
+- **Single-parse invariant:** read/parse each file once; both extractors share the AST. Keep it that way when adding new analysis.
+- **Ordering rules:** discovery = files-before-subdirectories (Phase 0 contract); facts sorted by discovery/target line; candidates sorted by `(parameter, kind rank, reference)`.
+- **Test helpers:** `tests/test_cli.py::stat_value(output, label)` for CLI stats; `tests/test_safety.py` holds the no-execution enforcement over the whole package.
+- **Ruff formats Markdown Python fences:** `ruff format --check .` counts README/decisions/flow/handoff.
+- **Git identity:** repo-local `PrathamKapoor` / `prathamkapoor027@gmail.com`; no remote. Phase 2 commit: `b538557` plus documentation commits.
 - **Windows shell:** PowerShell 7; commands use `.venv\Scripts\...` paths.
 
 ## 12. Agent Instructions
 
-1. Read `decisions.md`, `flow.md`, and `handoff.md` completely before changing code; Phase 0/1 decisions are binding.
+1. Read `decisions.md`, `flow.md`, and `handoff.md` completely before changing code; Phase 0/1/2 decisions are binding.
 2. Keep the hard invariant: no import/exec/eval of analyzed code; extend `tests/test_safety.py` when new modules are added.
-3. Make the smallest coherent change; keep the CLI a formatting layer and library modules print-free; typed, frozen models only.
-4. New user-visible ordering must be deterministic; prefer `(lineno, qualified_name)` style sort keys.
-5. Append a `decisions.md` entry (`D-NNN`, all required fields) for every meaningful change and update `flow.md` with real names in the same commit; use `uncommitted`, then replace with the real hash in a follow-up documentation commit.
-6. Before every commit run: `.venv\Scripts\python.exe -m pytest`, `-m ruff check .`, `-m ruff format --check .`, `-m mypy`; never claim results that were not observed.
-7. Commit only as `PrathamKapoor <prathamkapoor027@gmail.com>`; no co-author/tool/model attribution anywhere.
-8. Never commit `.venv/`, caches, egg-info, `paper/`, `research/`, or `*.tex`.
-9. Do not start Phase 2 features (branch analysis, boundary mining, property inference, execution, models) unless the task explicitly instructs it.
-10. At the end of the next session, rewrite `handoff.md` with all 12 sections and record real commit hashes.
+3. Keep one read/parse per file; new analysis consumes the existing AST, never re-reads or re-parses.
+4. Make the smallest coherent change; keep the CLI a formatting layer and library modules print-free; typed, frozen models only.
+5. New user-visible ordering must be deterministic with explicit sort keys.
+6. Candidates are regions, never bugs; `assert` predicates are syntax, never inferred properties.
+7. Append a `decisions.md` entry (`D-NNN`, all required fields) for every meaningful change and update `flow.md` with real names in the same commit; use `uncommitted`, then replace with the real hash in a follow-up documentation commit.
+8. Before every commit run: `.venv\Scripts\python.exe -m pytest`, `-m ruff check .`, `-m ruff format --check .`, `-m mypy`; never claim results that were not observed.
+9. Commit only as `PrathamKapoor <prathamkapoor027@gmail.com>`; no co-author/tool/model attribution anywhere.
+10. Never commit `.venv/`, caches, egg-info, `paper/`, `research/`, or `*.tex`.
+11. Do not start Phase 3 features (risk scoring, property/oracle mining, test generation, execution, models) unless the task explicitly instructs it.
+12. At the end of the next session, rewrite `handoff.md` with all 12 sections and record real commit hashes.
