@@ -24,9 +24,14 @@ in-process:      typer.testing.CliRunner -> the typer.Typer application (used by
 ```text
 edgehunter
 ├── --version                        (eager option on the root callback `_root_callback`)
-└── scan PATH [--targets] [--boundaries] [--risk] [--properties] [--actions] [--candidates]
-            [--annotations] [--plans] [--strategies]        (command `scan`)
+├── scan PATH [--targets] [--boundaries] [--risk] [--properties] [--actions] [--candidates]
+│             [--annotations] [--plans] [--strategies]        (command `scan`)
+└── run PATH --target NAME [--allow-execution] [--max-cases N] [--timeout S]
+                                                       (command `run`)
 ```
+
+`scan` is static only and never executes target code. `run` is the only command
+that starts a container, and it requires an explicit target plus opt-in.
 
 ## 3. Flow: `edgehunter --version`
 
@@ -250,7 +255,113 @@ per-file helper.
 - Strategies exist only for targets that have at least one action.
 - No value is ever sampled or generated: the plan is a fixed, ordered table.
 
-## 16. Diagram
+## 16. Execution rules (`src/edgehunter/execution/`, `src/edgehunter/runtime/`)
+
+`run` is the only path that loads target code, and the load happens in one place:
+`runtime/worker.py`, inside a container. Everything under `execution/` runs on the
+host and treats the repository as data.
+
+### 16.1 Authorization and backend availability
+
+```text
+edgehunter run PATH --target T [--allow-execution]
+ └─ run()                                             src/edgehunter/cli.py
+     ├─ no --allow-execution ──────────────────────► exit 3, repository never read
+     ├─ analyze_repository(path)                    (identical to the scan path; static only)
+     ├─ _resolve_target(analysis, target)           resolves `name` or `path::name`
+     │    ├─ zero matches ─────────────────────────► exit 2, "no analyzed target matched"
+     │    ├─ two+ matches ─────────────────────────► exit 2, "more than one file", shows how to qualify
+     │    └─ exactly one match ────────────────────► carries the file hint through to the execution layer
+     └─ execute_target(...)                         src/edgehunter/execution/repository.py
+          └─ docker_available()                    src/edgehunter/execution/docker.py
+               ├─ no CLI / daemon unreachable / OSType != linux ──► SandboxState.UNAVAILABLE, exit 3
+               └─ linux ──────────────────────────► ensure_image() builds edgehunter-runtime:1 from
+                                                    runtime_context() if `docker image inspect` misses
+```
+
+Exit codes for `run`: `0` observed run, `2` invalid input, `3` refused or
+unavailable. `1` is never used by `run`, so it cannot be confused with the
+scanner's "issues found" code.
+
+### 16.2 Selection, eligibility, and staging
+
+```text
+execute_target
+ ├─ _select_plans(scan, options)                   repository.py
+ │    ├─ collect modules defining the qualified name, apply the file hint
+ │    ├─ 0 matches ──► UNKNOWN_TARGET ; >1 ──► AMBIGUOUS_TARGET (both stop here)
+ │    └─ for each plan with matching target AND relative_path:
+ │         ├─ check_relative_path()                eligibility.py  (posix + windows reading)
+ │         ├─ check_eligibility(plan, function)    eligibility.py
+ │         │     status, kind, decorators, relative path, supported values
+ │         └─ keep eligible, truncate to bounded_case_limit() (max 20)
+ ├─ no eligible plan ──► SandboxState.NOT_REQUIRED, exit 3, no container started
+ └─ _stage_workspace(source_root, run_root)        staging.py
+       discover_python_sources → stage_source
+         ├─ containment check, symlink refusal, .py only, ≤100 files,
+         │  ≤1 MiB per file, ≤8 MiB total
+         └─ StagingError ⇒ SandboxState.ERROR with the specific failure
+```
+
+### 16.3 One container per plan
+
+```text
+_execute_one(plan, function, staged, run_root, timeout)          repository.py
+ ├─ assemble_invocation(plan, function)                          assembly.py
+ │     positional run closes at the first OMITTED parameter; unsupported values refuse
+ ├─ _request_document(request)                                   codec.py
+ │     dumps() then check_document_size(): an oversized request never starts a container
+ ├─ build_run_command(...)                                       docker.py
+ │     docker run --rm --network none --read-only --cap-drop ALL
+ │               --security-opt no-new-privileges --pids-limit 64
+ │               --memory 256m --cpus 1.0 --user 65534:65534
+ │               --tmpfs /tmp:rw,nosuid,nodev,size=16m
+ │               --mount workspace=…,target=/workspace,readonly
+ │               --mount request=…,target=/input,readonly
+ │               --mount output=…,target=/output   edgehunter-runtime:1
+ ├─ run_docker(command, timeout_seconds, cleanup_command)        docker.py
+ │     file-backed capture bounded at 64 KiB; timeout or non-zero exit runs
+ │     `docker rm --force`; stdin is DEVNULL; shell=False throughout
+ ├─ container_exists(name) ──► if true: remove, then re-check and report
+ └─ _decode_outcome(...)                                        repository.py
+       ├─ timed_out ───────────────────────────────► TIMEOUT
+       ├─ no result document ──────────────────────► WORKER_FAILURE  (never a silent pass)
+       ├─ unreadable document / unknown keys ──────► PROTOCOL_ERROR
+       ├─ nonce mismatch ─────────────────────────► PROTOCOL_ERROR
+       ├─ execution_id mismatch ───────────────────► PROTOCOL_ERROR
+       └─ accepted ───────────────────────────────► RETURNED / RAISED / IMPORT_FAILURE / …
+```
+
+### 16.4 Inside the container
+
+```text
+python -m edgehunter.runtime.worker               src/edgehunter/runtime/worker.py
+ ├─ codec imported at module load, BEFORE the staged tree reaches sys.path
+ ├─ _read_request()                               64 KiB cap, version check, JSON parse
+ ├─ _resolve_target(relative_file)                posix containment, .py only, must exist
+ ├─ _decode_arguments(invocation)                 decode_value → plain Python inside the sandbox only
+ └─ redirect_stdout/stderr → _BoundedStream, fds 1 and 2 → /dev/null
+      ├─ _load_callable()                         importlib.util.spec_from_file_location + exec_module
+      │     BaseException here ───────────────────► IMPORT_FAILURE  (function never called)
+      │     attribute missing / not callable ─────► TARGET_NOT_FOUND
+      ├─ function(*args, **kwargs)                exactly once
+      │     BaseException ────────────────────────► RAISED + exception_type + exception_message
+      └─ _encode_return(value)                    exact `type() is` checks
+            representable ────────────────────────► RETURNED + return_value
+            otherwise ────────────────────────────► RETURNED + opaque_return
+ └─ write /output/result.json                     nonce + execution_id echoed back
+```
+
+The staged tree is appended to `sys.path`, never prepended, so a staged module
+cannot shadow a standard-library module the worker relies on.
+
+### 16.5 Cleanup
+
+`_cleanup_problems()` removes the staged copy and the temporary execution
+directory without `ignore_errors`; any `OSError` is folded into the report's
+sandbox detail rather than suppressed.
+
+## 17. Diagram
 
 ```mermaid
 flowchart TD
@@ -283,6 +394,24 @@ flowchart TD
     T --> U{"structure.issue_count > 0?"}
     U -->|yes| V["exit 1"]
     U -->|no| W["exit 0"]
+
+    R1["edgehunter run PATH --target T --allow-execution"] --> R2{"--allow-execution?"}
+    R2 -->|no| R3["exit 3, nothing read, nothing executed"]
+    R2 -->|yes| R4["cli._resolve_target"]
+    R4 -->|"unknown or ambiguous"| R5["exit 2"]
+    R4 -->|resolved| R6["execution.repository.execute_target"]
+    R6 --> R7{"docker_available?"}
+    R7 -->|"no linux backend"| R8["SANDBOX_UNAVAILABLE, exit 3"]
+    R7 -->|yes| R9["ensure_image: edgehunter-runtime:1"]
+    R9 --> R10["_select_plans → check_relative_path → check_eligibility"]
+    R10 -->|"nothing eligible"| R11["NOT_REQUIRED, exit 3"]
+    R10 --> R12["_stage_workspace (read-only copy, limits enforced)"]
+    R12 --> R13["per plan: assemble_invocation → typed JSON request"]
+    R13 --> R14["docker run hardened"]
+    R14 --> R15["worker imports target once, writes result.json"]
+    R15 --> R16["host decodes result (nonce + execution_id + key allowlist)"]
+    R16 --> R17["verify container removed, delete temporary tree"]
+    R17 --> R18["RunReport: RETURNED / RAISED / TIMEOUT / IMPORT_FAILURE / PROTOCOL_ERROR / WORKER_FAILURE"]
 ```
 
 ## Changes in this session (Phase 0: Repository Bootstrap and Engineering Foundation)
@@ -370,3 +499,20 @@ flowchart TD
 | CLI | `scan` gained `--annotations`, `--plans`, `--strategies`, a Planning summary block, and plans/strategies before source issues | src/edgehunter/cli.py | 52fb551 | D-044 |
 | tests | Added annotation, invocation, and strategy suites; extended boundary, action, case, CLI, pipeline, and safety tests | tests/test_annotations.py, tests/test_invocation.py, tests/test_strategy.py, tests/test_boundaries.py, tests/test_generation_actions.py, tests/test_generation_cases.py, tests/test_generation_materialize.py, tests/test_cli.py, tests/test_pipeline.py, tests/test_safety.py | 52fb551 | D-036..D-044 |
 | docs | Added decisions D-036..D-044 and updated this flow document | decisions.md, flow.md | 4c6b922, 52fb551 | none |
+
+## Changes in this session (Phase 6A - Isolated Execution Backend)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| protocol | Added strict typed-value codec: `ValueKind`, rendered-literal recognition by AST whitelist, special-float text form, deterministic set ordering, depth/size/item limits | src/edgehunter/execution/codec.py | 89865f7 | D-046 |
+| models | Added typed outcomes, eligibility reasons, `ExecutionRequest`, `RuntimeObservation`, `ExecutionResult`, `SandboxStatus`, `StagedSource`, `RunReport` | src/edgehunter/execution/models.py | 89865f7 | D-057 |
+| assembly | Added deterministic argument assembly that closes the positional run at the first omitted default | src/edgehunter/execution/assembly.py | 89865f7 | D-049 |
+| eligibility | Added status/kind/decorator/path/value gate; path checked as both POSIX and Windows | src/edgehunter/execution/eligibility.py | 89865f7 | D-053 |
+| staging | Added `.py`-only staging with containment, symlink refusal, per-file and total size limits, and cleanup | src/edgehunter/execution/staging.py | 89865f7 | D-055 |
+| backend | Added hardened `docker run` builder, availability check, bounded file-backed capture, timeout, forced cleanup, container verification | src/edgehunter/execution/docker.py | 89865f7 | D-045, D-051, D-055 |
+| orchestration | Added plan selection with unambiguous target identity, image preparation, staging, one container per plan, and result decoding with nonce/ID/key allowlist | src/edgehunter/execution/repository.py | 89865f7 | D-052, D-057 |
+| worker | Added the container-only target loader/invoker: bounded output sink, fd discard, single invocation, exact-type return encoding | src/edgehunter/runtime/worker.py | 89865f7 | D-047, D-048, D-050, D-054 |
+| image | Added the packaged, digest-pinned worker `Dockerfile` and its package-data declaration | src/edgehunter/runtime/Dockerfile, pyproject.toml | 89865f7 | D-056 |
+| CLI | Added `run` with `--target`, `--allow-execution`, `--max-cases`, `--timeout`; ambiguous or unknown targets exit 2; exit 1 is unused by `run` | src/edgehunter/cli.py | 89865f7 | D-052, D-057 |
+| tests | Added codec, assembly, eligibility, staging, docker-argument, worker-protocol, boundary, CLI, and real-Docker integration suites; registered the `integration` marker | tests/test_execution_*.py, pyproject.toml | 89865f7 | D-045 to D-057 |
+| docs | Recorded D-045 to D-057 including three defect fixes with symptom, root cause, and regression test | decisions.md, flow.md | 89865f7 | D-046 to D-057 |

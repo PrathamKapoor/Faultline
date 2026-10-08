@@ -43,8 +43,8 @@ straightforward code.
 
 **Early development. Structure, semantics, boundaries, structural risk ranking,
 explicit oracle mining, static annotation shapes, safe baseline synthesis,
-invocation planning, and strategy planning are implemented; the counterexample
-search engine is not.**
+invocation planning, strategy planning, and an isolated Docker execution backend
+are implemented; the counterexample search engine is not.**
 
 What exists today:
 
@@ -97,9 +97,21 @@ What exists today:
 - structured reporting of syntax errors and unreadable files without aborting
   the scan, plus `--targets`, `--boundaries`, `--risk`, `--properties`,
   `--actions`, `--candidates`, `--annotations`, `--plans`, and `--strategies`
+- an isolated execution backend, reached only through `edgehunter run` and only
+  with explicit opt-in: eligible Phase 5 plans are assembled into a typed JSON
+  request, executed one container per plan inside a hardened Docker sandbox, and
+  decoded back into structured observations
+- a deterministic eligibility gate that refuses unsupported targets (async
+  functions, methods needing a receiver, nested or decorated functions, unsafe
+  paths, unsupported values) with a named reason instead of attempting them
+- safe source staging that copies only `.py` files, refuses symlinks, enforces
+  containment, and applies hard file-count and size limits
+- bounded output capture on both sides of the boundary: the worker keeps 16 KiB
+  of Python-level output and discards the rest as it is written, and host-side
+  Docker output is read through a 64 KiB cap
 
-Safety: analyzed code is never imported or executed, including tests. The
-scanner reads text and parses it; nothing else. Annotations are interpreted
+Safety: `scan` analyzes code and never imports or executes it, including tests.
+The scanner reads text and parses it; nothing else. Annotations are interpreted
 syntactically and never resolved or evaluated — a forward reference such as
 `"User"` stays unknown rather than being parsed, and an annotation that is a
 call expression is classified unknown and never invoked. Materialized values and
@@ -108,15 +120,30 @@ run here. Regression tests prove module-level side effects in scanned files do
 not run, that mined test expectations are not executed, that hostile annotations
 are not invoked, and that the package contains no execution primitives.
 
+Execution exists, but it is strictly separated. Target code is imported and
+called in exactly one module, `edgehunter.runtime.worker`, and only inside a
+container. Every host-side component — scanner, analysis, oracle, generation,
+pipeline, and the execution orchestration itself — treats the repository as
+data. A test walks the package's own AST and fails if any module other than the
+worker gains the ability to execute code, import the import system, or
+deserialize an object. There is no fallback: if Docker is missing or unusable,
+the report says so and nothing runs.
+
 What does **not** exist yet: risk calibration, property inference from
-docstrings or metamorphic relations, executable test generation, execution,
-oracle evaluation, counterexamples, failure shrinking, and any model-based
-search. Three things are deliberately *not* claimed here: a boundary candidate
+docstrings or metamorphic relations, executable test generation, oracle
+evaluation, counterexamples, failure shrinking, and any model-based search.
+Three things are deliberately *not* claimed here: a boundary candidate
 is not a bug, mined oracle evidence is not a defect — it is an explicit
 expectation a later execution stage can check — and neither a candidate case nor
 an invocation plan is a reproducing input until something actually runs it. A
 baseline value is not a validity claim: `0` is the simplest statically
 constructible integer, not a "valid" one.
+
+**A recorded outcome is not a finding.** `edgehunter run` reports `RETURNED`,
+`RAISED`, `TIMEOUT`, `IMPORT_FAILURE`, `TARGET_NOT_FOUND`, `PROTOCOL_ERROR`, and
+`WORKER_FAILURE`. Phase 6A performs no oracle evaluation, so an exception
+observed during a run is a fact about that run, not a defect claim. The report
+states this explicitly.
 
 ### Known limitation: annotation interpretation is syntactic
 
@@ -135,6 +162,32 @@ an ordinary codebase stay unknown, because most are annotated with project types
 or subscripted generics of them. Unknown means "no baseline, no plan", not
 "broken".
 
+### Known limitation: the sandbox is a strong default, not a proof
+
+Execution requires a working Docker installation with a **Linux** backend; a
+Windows or macOS Docker daemon that reports a non-Linux server is refused, and
+`edgehunter run` reports `unavailable` without executing anything. The container
+runs with no network, a read-only root filesystem, all capabilities dropped,
+`no-new-privileges`, a non-root user, PID, memory, and CPU limits, a small
+`/tmp`, and the staged source mounted read-only. Docker's default seccomp
+profile is retained.
+
+What this does **not** claim:
+
+- A Docker sandbox reduces risk; it does not eliminate it. Container escapes have
+  existed, and a kernel or Docker vulnerability is outside EdgeHunter's control.
+- The staged copy is a snapshot. Files the target creates at run time vanish with
+  the container and are not reported back to the host.
+- Targets needing third-party packages are refused rather than installed. Nothing
+  is installed into the sandbox or the host.
+- Only synchronous, undecorated, top-level functions whose arguments all have
+  supported values are eligible. Everything else is refused with a stated reason.
+- A timeout kills the container; it does not explain what the target was doing.
+- Captured output is bounded and truncated, so it is a sample, not a transcript.
+  Native writes to file descriptors 1 and 2 are discarded entirely.
+- A `RAISED` outcome is an observation. Phase 6A does not compare the result
+  against any oracle, so it cannot and does not report a bug.
+
 ## Installation
 
 Requires Python 3.10 or newer.
@@ -149,6 +202,10 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+`edgehunter scan` needs nothing beyond this. `edgehunter run` additionally needs
+Docker with a Linux backend; the first run builds a small trusted worker image
+from EdgeHunter's own packaged sources.
 
 ## Usage
 
@@ -524,8 +581,8 @@ adjacent representable values, labelled with the boundary they came from. A
 `list[CustomType]` yields only `empty`: never a fabricated `[None]`.
 
 Note also that this is a *description*, not a sample. Nothing here is generated at
-scan time, and no value is ever passed to a target function, because EdgeHunter
-does not execute anything.
+scan time, and no value is ever passed to a target function, because `scan` does
+not execute anything.
 
 Exit codes:
 
@@ -552,6 +609,67 @@ Syntax issues
   broken.py:1:11
     '(' was never closed
 ```
+
+### Executing a target
+
+`scan` never executes. Execution is a separate, explicit command:
+
+```console
+$ edgehunter run ./example --target divide --allow-execution
+```
+
+Both a target and `--allow-execution` are required. Without the flag nothing is
+read and nothing runs:
+
+```console
+$ edgehunter run ./example --target divide
+error: execution requires explicit authorization; pass --allow-execution
+```
+
+If a name is defined in more than one file, EdgeHunter refuses to guess:
+
+```console
+$ edgehunter run ./example --target process --allow-execution
+error: 'process' is defined in more than one file (a.py, b.py); select it with --target 'path::process'
+```
+
+A run reports what happened:
+
+```console
+$ edgehunter run ./example --target divide --allow-execution --max-cases 3
+EdgeHunter execution
+
+  Sandbox: docker (ready)
+  trusted worker image available
+  Oracle evaluation: not performed
+  Finding: none (this phase only observes)
+
+  Target: math_ops.py::divide
+  Action: divide:a:set_negative_one:
+    Arguments:
+      a = -1.0  [adversarial_action]
+      b = 0.0  [static_type_baseline]
+  Outcome: RAISED
+  Exception: ZeroDivisionError
+  Message:   float division by zero
+  Duration:  0.043s
+```
+
+`--max-cases` (default 5, hard maximum 20) bounds how many eligible candidates are
+run for the selected target, and `--timeout` (default 3 s, clamped to 0.5–60 s) is
+the per-invocation wall-clock budget. A target that exceeds it is killed and
+reported as `TIMEOUT`.
+
+Exit codes for `run`:
+
+```text
+0  at least one invocation ran and was observed
+2  invalid input, such as an unknown or ambiguous target
+3  refused or unavailable: no opt-in, no eligible plan, or no usable Docker backend
+```
+
+Exit code `1` is deliberately unused by `run`, so a script can tell "the scan
+found something" from "the run did not happen".
 
 ## Architecture
 
@@ -594,6 +712,19 @@ src/edgehunter/
     ├── strategy.py    framework-independent strategy plans
     ├── planning.py    repository aggregation + annotation report
     └── repository.py  per-target aggregation + candidate cases
+├── execution/         host side of the isolation boundary: plans -> observations
+│   ├── __init__.py    public interface
+│   ├── codec.py       strict typed-value protocol + AST-whitelist literal reader
+│   ├── models.py      outcomes, eligibility, requests, observations, reports
+│   ├── assembly.py    arguments -> a real call, with the omitted-default rule
+│   ├── eligibility.py deterministic refusal gate (status, kind, path, values)
+│   ├── staging.py     read-only source copy with containment and size limits
+│   ├── docker.py      the only module that starts a host process (the docker CLI)
+│   └── repository.py  selection, staging, one container per plan, decoding
+└── runtime/           the trusted worker: the ONLY code that loads target code
+    ├── __init__.py    package marker
+    ├── worker.py      in-container loader/invoker, runs only inside the sandbox
+    └── Dockerfile     digest-pinned, non-root, no-network base (package data)
 ```
 
 Pipeline implemented today:

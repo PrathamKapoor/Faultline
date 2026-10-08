@@ -456,3 +456,140 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 - Alternatives considered: one `--planning` flag for all three views (merges three unrelated concerns and breaks the one-flag-per-view style); showing annotations in the default scan (doubles the summary on real repositories); emitting sampled values instead of plans (nondeterministic product output, explicitly forbidden).
 - Consequences: `scan --help` lists nine detail flags; `test_scan_reports_planning_statistics`, `test_scan_counts_complete_function_plans`, `test_scan_lists_annotation_shapes_with_flag`, `test_scan_lists_invocation_plans_with_flag`, `test_scan_shows_missing_arguments_and_unresolved_values`, `test_scan_marks_declared_defaults_and_receivers`, `test_scan_lists_strategy_plans_with_flag`, `test_scan_without_phase5_flags_omits_their_sections`, and `test_scan_reports_empty_phase5_sections` cover them. The existing `test_section_order_places_issues_last` still holds because issues remain last.
 - Files: src/edgehunter/cli.py, tests/test_cli.py
+
+### D-045: Docker is the only execution backend, and there is deliberately no host fallback
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: Phase 6A must execute untrusted target code without importing or invoking it on the host. A "try Docker, otherwise run locally" design would make the safe path optional, which is precisely the failure mode the phase exists to prevent: the local path would be taken silently whenever Docker was slow, missing, or misconfigured.
+- Decision: Add `execution/docker.py` as the only module permitted to start a host process, and it may only start the `docker` CLI. `docker_available()` returns a truthful `(bool, detail)` after checking for the CLI, that the daemon answers, and that the server `OSType` is `linux`. When it returns false, `execute_target` produces a report with `SandboxState.UNAVAILABLE` and zero results. There is no in-process interpreter, no `exec`, and no alternative runner.
+- Why: A security boundary that has a fallback is not a boundary, because the fallback is exercised exactly when the boundary is unavailable. Refusing to run is a reportable outcome, not an error to be papered over.
+- Alternatives considered: running target code in a host subprocess under a temporary directory (a subprocess shares the user's filesystem, credentials, and network); using `multiprocessing` or `subprocess` with a restricted environment (no filesystem, network, or capability isolation on any supported platform); falling back to a "no sandbox" mode with a warning (silently downgrades the guarantee the user asked for).
+- Consequences: `test_missing_docker_cli_is_reported_as_unavailable`, `test_unreachable_daemon_is_reported_as_unavailable`, `test_non_linux_daemon_is_refused`, and `test_linux_daemon_is_accepted` pin the availability contract. `test_execution_package_never_starts_a_process` in tests/test_execution_safety.py asserts structurally that only `subprocess.*` calls exist under `execution/`.
+- Files: src/edgehunter/execution/docker.py, src/edgehunter/execution/repository.py, tests/test_execution_docker.py, tests/test_execution_safety.py
+
+### D-046: Values cross the boundary as strict typed JSON, and rendered literals are recognized by an AST whitelist
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: Phase 5 plans carry values as rendered source text such as `-1`, `0.0`, or `[1, 2]`. Turning that into Python must not mean calling `eval`, and the protocol must survive JSON's lack of a float type for `nan`/`inf` and its treatment of sets and tuples.
+- Decision: `execution/codec.py` defines `ValueKind` (`INTEGER`, `FLOAT`, `BOOLEAN`, `STRING`, `NONE`, `LIST`, `TUPLE`, `SET`, `MAPPING`) and a versioned JSON document. `recognize_literal()` parses the rendered text with `ast.parse(..., mode="eval")` and accepts only literal nodes; a `Call`, `Name`, `Attribute`, `BinOp`, or comprehension raises `ProtocolError`. Special floats travel as the strings `nan`, `inf`, `-inf`, and `-0.0` is preserved. Sets are ordered by canonical JSON text so encoding is deterministic. Documents are capped at 64 KiB with depth 4, 100 collection items, 100 mapping entries, 4096-character strings, and an 8192-character rendered literal. Unknown keys in any typed value are rejected.
+- Why: An AST whitelist is the narrowest thing that accepts the literals the planner already produces while being unable to reach an interpreter, so the protocol cannot be talked into executing code. Canonical ordering for sets is what makes a result reproducible and testable.
+- Alternatives considered: `ast.literal_eval` (it accepts far more node types than needed and its accepted set is an implementation detail rather than a reviewed policy); `eval` in a restricted namespace (still an interpreter; a single oversight is code execution); encoding values as `repr` strings (a target-defined `__repr__` would run on the worker); a non-JSON pickle protocol (object deserialization, which the phase forbids outright).
+- Consequences: 53 tests in tests/test_execution_codec.py cover the wire format, the limits, and the refusal of every non-literal node type. `test_no_pickle_or_object_deserialization_anywhere` asserts no module imports a deserializer.
+- Files: src/edgehunter/execution/codec.py, tests/test_execution_codec.py, tests/test_execution_safety.py
+
+### D-047: The result travels in a file guarded by a nonce, never on stdout
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: Target code can write to file descriptor 1 at will. A protocol on stdout would therefore be forgeable by the target: it could print a fabricated successful result, or corrupt a real one mid-flight.
+- Decision: The worker writes exactly one result document to `/output/result.json` and nothing else. While the target runs, file descriptors 1 and 2 are redirected to `/dev/null`. Every request carries a fresh unguessable `nonce`; the host compares it to the returned document and reports a nonce mismatch as `PROTOCOL_ERROR`. The host also requires `execution_id` to match and rejects any unknown top-level key. A missing result document is `WORKER_FAILURE`, never an implicit pass.
+- Why: The channel that untrusted code can write to is exactly the channel the protocol must not use. The nonce makes the binding between one request and one response checkable instead of assumed.
+- Alternatives considered: encoding the result on a dedicated file descriptor passed to the worker (unnecessary indirection; a file in a directory only the result can write to achieves the same isolation); trusting any well-formed document from the container (a stale file from a previous run would be indistinguishable); exiting non-zero to signal the outcome (loses the structured detail and collapses distinct failures into one code).
+- Consequences: `test_result_documents_never_reach_the_container_stdout` runs a target that calls `os.write(1, ...)` and asserts the protocol survives. `TestHReadOnlyStaging` and the refusal tests depend on the same rule.
+- Files: src/edgehunter/runtime/worker.py, src/edgehunter/execution/repository.py, tests/test_execution_integration.py
+
+### D-048: Return values are described by exact built-in type checks, and anything else is reported opaque
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: Recording a return value is convenient, but every serialization route for a target-defined object runs target code: `repr` may be overridden, `pickle` executes `__reduce__`, and `__str__` may raise or block. A hostile `__repr__` would therefore be executing inside the sandbox on the recording path.
+- Decision: `_encode_value` uses `type(value) is X` for `bool`, `int`, `float`, `str`, `list`, `tuple`, `set`, and `dict` — exact checks, never `isinstance`, so a subclass with a custom `__repr__` is not silently encoded as its base. A set containing an unhashable-shaped element is refused. Anything else yields `{"outcome": "returned", "opaque_return": "returned <TypeName> (not representable)"}`. Exception types and messages are read through `type(exc).__name__` and `str(exc)`, both clipped.
+- Why: Exact type checks mean the recording path only ever touches built-ins whose behaviour is known, so no target-defined code runs to produce a report about a target-defined object.
+- Alternatives considered: `isinstance` (a subclass's `__repr__` would then be invoked when the value is rendered); `repr` with a length cap (still executes the override); `pickle` (explicitly forbidden, and unsafe even for a hostile-but-sandboxed target); reporting nothing at all for unrepresentable values (loses the information that *something* was returned).
+- Consequences: `test_subclassed_int_is_not_encoded_as_an_integer`, `test_custom_object_is_reported_opaque_not_serialized`, and `test_set_of_unhashable_elements_is_refused` assert the refusals; the last two also assert that a hostile `__repr__`/`__reduce__` output never appears in the report.
+- Files: src/edgehunter/runtime/worker.py, tests/test_execution_worker.py
+
+### D-049: Arguments are assembled positionally only up to the first omitted default
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: D-040 records a defaulted parameter as `OMITTED` with no value. Turning that into a call has one non-obvious rule: once a positional-or-keyword parameter is skipped, every later positional-or-keyword parameter must also be passed by keyword, or the values shift by one position.
+- Decision: `assemble_invocation()` walks the ordered parameter tuple once. A `POSITIONAL_ONLY` parameter is always passed positionally. The positional run continues while the placement is `POSITIONAL`; the first `OMITTED` parameter closes the positional run and everything after it is passed by keyword. Keyword-only parameters are always keywords. `VAR_POSITIONAL` and `VAR_KEYWORD` receive nothing. Any unsupported or unresolved value fails the whole plan closed rather than dropping the argument.
+- Why: Getting this wrong would silently bind values to the wrong parameters, producing an observation about a call nobody made. Closing the positional run is the only arrangement that preserves each parameter's identity.
+- Alternatives considered: filling omitted parameters with their declared defaults (requires evaluating them, which the phase forbids); passing every argument by keyword always (breaks `POSITIONAL_ONLY` parameters and any name-mangling or re-binding a call relies on); dropping the plan when any default is omitted (discards a large fraction of real targets for no safety gain).
+- Consequences: `test_omitted_default_does_not_shift_the_next_positional`, `test_positional_only_parameter_is_passed_positionally`, `test_keyword_only_parameter_is_passed_by_keyword`, and `test_variadic_parameters_receive_nothing` cover the rules in tests/test_execution_assembly.py.
+- Files: src/edgehunter/execution/assembly.py, tests/test_execution_assembly.py
+
+### D-050: Output is bounded on both sides of the boundary, and the capture must never grow without limit
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: A flooding or looping target can produce unbounded output. The host must not grow its memory in response, and the worker's capture must be bounded at the moment of writing rather than after the fact.
+- Decision: The worker redirects Python-level stdout/stderr into `_BoundedStream`, a sink that keeps at most 16 KiB and discards the excess as it arrives while always reporting a full write, so a target never sees a short write and never causes an accumulation. Native writes to file descriptors 1 and 2 go to `/dev/null`. On the host, `run_docker()` captures through temporary files read back under `MAX_CAPTURED_OUTPUT_BYTES` (64 KiB) rather than `capture_output=True`.
+- Symptom: The first implementation used `io.StringIO` and truncated only after the invocation returned, so a target printing in a loop accumulated without limit for the whole run.
+- Root cause: The bound was applied to the finished string instead of to the writer.
+- Regression test: `test_flooding_never_grows_past_the_cap`, `test_output_beyond_the_cap_is_discarded`, and `TestDOutputFlood::test_flooding_output_is_truncated_not_unbounded`, which runs a real container printing 5,000 lines and asserts `stdout_truncated is True` and the captured size is within 16 KiB.
+- Alternatives considered: keeping `StringIO` and clipping afterwards (the defect above); streaming output to the host and truncating there (moves unbounded memory to the host, which is the thing being protected); letting the container's memory limit absorb it (a cgroup OOM kill destroys the observation instead of recording it).
+- Files: src/edgehunter/runtime/worker.py, src/edgehunter/execution/docker.py, tests/test_execution_worker.py, tests/test_execution_docker.py, tests/test_execution_integration.py
+
+### D-051: Host-side process output is captured through files, not an in-memory pipe
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: `run_docker` originally used `subprocess.run(..., capture_output=True)`, which buffers both pipes entirely in host memory before returning. Target output does not reach those pipes, but a misbehaving or verbose Docker process would still be able to grow host memory for as long as the budget allowed.
+- Decision: `_run_bounded()` redirects stdout and stderr to temporary files, closes them, and reads at most `MAX_CAPTURED_OUTPUT_BYTES` from each. `stdin` is `DEVNULL`. The timeout and the cleanup command behave as before.
+- Symptom: The unbounded in-memory capture was found during the Phase 6A security review, not by a failing test.
+- Root cause: `capture_output=True` was the convenient default, and the bound was only reasoned about for the worker side of the boundary.
+- Regression test: `test_captured_output_is_bounded_even_for_a_flood` starts a real process that writes 500,000 bytes to both streams and asserts each captured stream is within the cap.
+- Alternatives considered: reading the pipes incrementally (more code for the same guarantee); capping only the worker and accepting the host risk (the host is what the phase protects); limiting by process count instead of by bytes (does not bound a single noisy process).
+- Files: src/edgehunter/execution/docker.py, tests/test_execution_docker.py
+
+### D-052: A target is identified by path and qualified name together, and ambiguity is refused
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: A qualified name is not unique. Two modules can each define `process`, and the earlier implementation kept the first match found while scanning, so `--target` could silently execute a different function than the user named.
+- Decision: `--target` accepts `name` or `path::name`. Resolution collects every module that defines the name, applies the file hint when given, and requires exactly one match. Zero matches is an unknown target and more than one is `AMBIGUOUS_TARGET`; both name the candidate files and tell the user how to disambiguate. The resolved spec, including the file hint, is passed through to the execution layer so it resolves the identical identity rather than a bare name. Plan selection additionally matches on `relative_path`, so plans from a same-named function in another module are never mixed in.
+- Symptom: `test_run_with_a_file_hint_resolves_the_ambiguity` failed with the ambiguity message even though `two.py::process` named exactly one definition.
+- Root cause: The CLI resolved the spec correctly and then passed only the bare qualified name to `execute_target`, which re-resolved it and correctly reported the ambiguity.
+- Regression test: `test_run_with_a_file_hint_resolves_the_ambiguity`, `test_run_with_ambiguous_target_is_invalid_input`, and `test_run_with_a_file_hint_for_the_wrong_file_is_invalid_input`.
+- Alternatives considered: first match wins (silently runs the wrong function); last match wins (equally arbitrary); requiring a file hint always (adds friction for the common case where the name is unique).
+- Files: src/edgehunter/execution/repository.py, src/edgehunter/cli.py, tests/test_execution_cli.py
+
+### D-053: Path validation must be read as a Windows path as well as a POSIX path
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: Staged target paths are validated on the host, which runs on Windows. `PurePosixPath("C:/Windows/system32/x.py").is_absolute()` is `False`, because a POSIX parser has no concept of a drive letter, so a drive-qualified absolute path passed the escape check.
+- Decision: `check_relative_path()` applies both readings. `PureWindowsPath` rejects any drive and any Windows-absolute path; `PurePosixPath` rejects POSIX-absolute paths, `..` segments, and backslashes. Each refusal names the specific problem.
+- Symptom: `test_unsafe_relative_paths_are_rejected[C:/Windows/system32/x.py]` failed with `assert None is not None`; the verifier accepted a Windows absolute path.
+- Root cause: Only a POSIX reading of the path was implemented, while the host that performs the check runs on Windows.
+- Regression test: `test_unsafe_relative_paths_are_rejected` parametrized over `../outside.py`, `a/../../escape.py`, `/etc/passwd`, and `C:/Windows/system32/x.py`.
+- Alternatives considered: normalizing with `os.path.abspath` and testing containment (would couple the check to the host filesystem and to a directory that does not exist yet); rejecting every path containing a colon (would also reject a legitimate relative segment on POSIX); relying on the staging layer alone (the worker's own check is container-side and happens after the request is built).
+- Files: src/edgehunter/execution/eligibility.py, tests/test_execution_eligibility.py
+
+### D-054: `None` is a supported return kind, not an unrepresentable one
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: The codec has supported `NONE` since D-046, but the worker's return encoder enumerated `bool`, `int`, `float`, `str`, and the containers, and let everything else fall through to the opaque branch. A function returning `None` — very common — was therefore reported as `returned NoneType (not representable)`.
+- Decision: `_encode_value` returns `TypedValue(kind=ValueKind.NONE)` for `None`, using a direct `is None` test rather than a `type()` comparison, and the opaque branch keeps its existing behaviour for genuinely unsupported types.
+- Symptom: `test_supported_returns_are_encoded[None-none]` failed with `KeyError: 'return_value'`; a `None` return was reported as opaque.
+- Root cause: The return encoder was written against the list of types that carry a payload and forgot the one kind that carries none.
+- Regression test: `test_supported_returns_are_encoded` includes the `None` case, and `test_non_finite_float_is_not_nan_from_host_side` pins the adjacent scalar handling.
+- Alternatives considered: leaving `None` opaque (loses a correct, useful observation on the most common return value); special-casing it in the host decoder (the encoder is the right place, since the value is known only there).
+- Files: src/edgehunter/runtime/worker.py, tests/test_execution_worker.py
+
+### D-055: Cleanup is verified rather than assumed, and a deletion failure is reported instead of swallowed
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: `--rm` plus a forced `docker rm` is best-effort. A container that survives, or a temporary tree that cannot be deleted, must be visible; suppressing the failure would leave the user believing the host is clean when it is not.
+- Decision: After each run the host checks whether the container still exists; if it does, it removes it and checks again, reporting a second-attempt failure rather than claiming success. The temporary execution tree is removed without `ignore_errors`, and any `OSError` from either deletion is folded into the report's sandbox detail. A timeout and a non-zero exit both trigger the cleanup command.
+- Symptom: The earlier code reported "container cleanup required a second attempt" whether or not the second attempt worked, and passed `ignore_errors=True` to the tree removal.
+- Root cause: Cleanup was treated as a step to perform rather than a postcondition to verify.
+- Regression test: `test_timeout_runs_cleanup_and_reports_it`, `test_non_zero_exit_also_triggers_cleanup`, `test_cleanup_failure_does_not_hide_the_original_failure`, and `TestCleanup::test_no_edgehunter_containers_survive_a_run`.
+- Alternatives considered: trusting `--rm` alone (it does not fire when the client is killed); retrying removal in a loop (a removed container needs no help; a failed one needs a report, not more attempts).
+- Files: src/edgehunter/execution/repository.py, src/edgehunter/execution/docker.py, tests/test_execution_docker.py, tests/test_execution_integration.py
+
+### D-056: The worker image is built from EdgeHunter's own sources and travels inside the package
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: The sandbox image must exist for an installed distribution as well as a checkout, and the build context must never be the scanned repository, since that would let target code influence the image.
+- Decision: `runtime/Dockerfile` lives inside the `edgehunter` package and is declared as package data. The build context is `runtime_context()`, the directory containing the `edgehunter` package itself, resolved from `edgehunter.__file__`. The base image is pinned by digest. The Dockerfile creates no user (`65534` already exists as `nobody` in the base) and copies the package to `/opt/edgehunter/site/edgehunter` on `PYTHONPATH`.
+- Symptom: The first build failed twice: `useradd` reported that UID `65534` was already in use, and `COPY edgehunter/ /opt/edgehunter/site/` flattened the package so `import edgehunter.execution.codec` failed inside the container.
+- Root cause: Assumptions about the base image's `/etc/passwd` and about Docker's `COPY` of a directory's contents, neither verified against the pinned image.
+- Regression test: `test_run_executes_a_real_container` and every test in tests/test_execution_integration.py build or reuse this image and import the codec inside it; a failed build surfaces as a skip with the build output rather than as a silent pass.
+- Alternatives considered: building the image from the repository under test (lets target code into the trusted image); requiring users to build the image separately (moves a required step outside the tool); embedding the worker as a base64 string in Python (unreadable and unmaintainable).
+- Files: src/edgehunter/runtime/Dockerfile, src/edgehunter/runtime/worker.py, pyproject.toml, src/edgehunter/execution/repository.py
+
+### D-057: Execution is reached only through an explicit opt-in, and a missing or duplicate result is never a pass
+
+- Date / phase / commit: 2026-10-09, Phase 6A (Isolated Execution Backend), 89865f7
+- Context: The static scanner must remain the default and must never execute anything, and a container that produced no readable result has told the user nothing about the target's behaviour.
+- Decision: `edgehunter run` requires both `--target` and `--allow-execution`; without the flag it exits `3` before reading the repository. Exit codes are `0` when a run was observed, `2` for invalid input, and `3` for a refusal or unavailable backend; `1` is never used by `run`, so a run is never confused with the scanner's "issues found" code. Outcomes are `RETURNED`, `RAISED`, `TIMEOUT`, `IMPORT_FAILURE`, `TARGET_NOT_FOUND`, `PROTOCOL_ERROR`, and `WORKER_FAILURE`, each carrying its own detail. A missing result is `WORKER_FAILURE`; an unreadable or unknown-keyed document is `PROTOCOL_ERROR`.
+- Why: Keeping `1` unused for `run` means a script can tell "the scanner found something" from "the run was refused" without parsing output, and it keeps an exception from ever reading as a defect.
+- Alternatives considered: making `--allow-execution` a config-file setting (a hidden opt-out is not an opt-in); reusing exit code `1` for refusals (conflates "issues found" with "nothing ran"); treating a missing result as a timeout (invents an outcome the container never reported).
+- Consequences: `test_run_without_opt_in_refuses`, `test_scan_never_consults_the_execution_backend`, `test_scan_exit_codes_are_unchanged`, and `test_static_analysis_entry_point_does_not_import_execution` pin the contract. The report prints "Oracle evaluation: not performed" and "Finding: none (this phase only observes)" so no output can be read as a bug claim.
+- Files: src/edgehunter/cli.py, src/edgehunter/execution/repository.py, tests/test_execution_cli.py, tests/test_execution_safety.py
