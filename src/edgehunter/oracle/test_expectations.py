@@ -107,6 +107,7 @@ def _expectation(
         call_expression=call_text,
         comparison_operator=operator,
         expected_expression=render_source(expected),
+        literal_arguments=_literal_arguments(call),
         evidence=(
             OracleEvidence(
                 kind=OracleEvidenceKind.TEST_ASSERTION,
@@ -116,6 +117,37 @@ def _expectation(
             ),
         ),
     )
+
+
+def _literal_arguments(call: ast.Call) -> tuple[str, ...]:
+    """Positional arguments that are pure literals, in call order.
+
+    These are real observed inputs a repository author already chose, which makes
+    them stronger evidence than a synthesized baseline. Anything that is not
+    literal syntax — a fixture, a name, a constructor call, a subscript — is
+    skipped rather than evaluated.
+    """
+    literals: list[str] = []
+    for argument in call.args:
+        if isinstance(argument, ast.Starred):
+            continue
+        text = _literal_text(argument)
+        if text is not None:
+            literals.append(text)
+    return tuple(literals)
+
+
+def _literal_text(node: ast.expr) -> str | None:
+    """Render one argument as literal text, or return ``None`` when it is not one."""
+    if isinstance(node, ast.Constant):
+        return render_source(node)
+    if isinstance(node, ast.List) and not node.elts:
+        return "[]"
+    if isinstance(node, ast.Tuple) and not node.elts:
+        return "()"
+    if isinstance(node, ast.Dict) and not node.keys:
+        return "{}"
+    return None
 
 
 def _raises_expectations(
@@ -138,6 +170,7 @@ def _raises_expectations(
             callee=_callee_name(body_call),
             call_expression=call_text,
             exception=exception,
+            literal_arguments=_literal_arguments(body_call),
             evidence=(
                 OracleEvidence(
                     kind=OracleEvidenceKind.TEST_RAISES,

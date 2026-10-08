@@ -13,6 +13,7 @@ from typing import Annotated
 import typer
 
 from edgehunter import __version__
+from edgehunter.generation.invocation import ArgumentAssignment, ArgumentPlacement
 from edgehunter.generation.models import MaterializationStatus, SemanticAction
 from edgehunter.oracle.models import (
     ProductionPropertyCandidate,
@@ -83,15 +84,28 @@ def scan(
         bool,
         typer.Option("--candidates", help="List materialized candidate cases per target."),
     ] = False,
+    annotations: Annotated[
+        bool,
+        typer.Option("--annotations", help="List each parameter's static annotation shape."),
+    ] = False,
+    plans: Annotated[
+        bool,
+        typer.Option("--plans", help="List invocation plans with argument origins."),
+    ] = False,
+    strategies: Annotated[
+        bool,
+        typer.Option("--strategies", help="List deterministic strategy plans per target."),
+    ] = False,
 ) -> None:
     """Discover Python sources under PATH and analyze them statically.
 
     Files are parsed once with Python's ``ast`` module, then analyzed for
     structure, predicates, comparisons, arithmetic, boundary candidates, mined
-    oracle evidence, structural risk, and constrained semantic actions. Analyzed
-    code is never imported or executed, and candidate inputs are never run. The
-    command exits with 1 when one or more files could not be read or parsed;
-    oracle ambiguity is not a source failure.
+    oracle evidence, structural risk, constrained semantic actions, static
+    annotation shapes, invocation plans, and strategy plans. Analyzed code is
+    never imported or executed, and candidate inputs are never run. The command
+    exits with 1 when one or more files could not be read or parsed; oracle
+    ambiguity is not a source failure.
     """
     try:
         analysis = analyze_repository(path)
@@ -107,6 +121,9 @@ def scan(
         show_properties=properties,
         show_actions=actions,
         show_candidates=candidates,
+        show_annotations=annotations,
+        show_plans=plans,
+        show_strategies=strategies,
     )
 
     if analysis.semantics.structure.issue_count:
@@ -122,6 +139,9 @@ def _print_analysis(
     show_properties: bool,
     show_actions: bool,
     show_candidates: bool,
+    show_annotations: bool,
+    show_plans: bool,
+    show_strategies: bool,
 ) -> None:
     semantics = analysis.semantics
     structure = semantics.structure
@@ -149,6 +169,10 @@ def _print_analysis(
 
     _print_oracle_counts(analysis)
     _print_generation_counts(analysis)
+    _print_planning_counts(analysis)
+
+    if show_annotations:
+        _print_annotations(analysis)
 
     if show_targets:
         _print_targets(structure)
@@ -168,7 +192,28 @@ def _print_analysis(
     if show_candidates:
         _print_candidates(analysis)
 
+    if show_plans:
+        _print_plans(analysis)
+
+    if show_strategies:
+        _print_strategies(analysis)
+
     _print_issues(structure)
+
+
+def _print_planning_counts(analysis: RepositoryScan) -> None:
+    planning = analysis.planning
+    annotations = analysis.annotations
+    typer.echo("")
+    typer.echo("  Planning")
+    typer.echo(f"    Parameters recognized:    {annotations.recognized_count}")
+    typer.echo(f"    Parameters unknown:       {annotations.unknown_count}")
+    typer.echo(f"    Invocation plans:         {planning.plan_count}")
+    typer.echo(f"    Complete function plans:  {planning.complete_plan_count}")
+    typer.echo(f"    Needs receiver:           {planning.needs_receiver_count}")
+    typer.echo(f"    Partial plans:            {planning.partial_plan_count}")
+    typer.echo(f"    Symbolic plans:           {planning.symbolic_plan_count}")
+    typer.echo(f"    Strategy plans:           {planning.strategy_plan_count}")
 
 
 def _print_generation_counts(analysis: RepositoryScan) -> None:
@@ -433,6 +478,100 @@ def _render_value(action: SemanticAction) -> str:
     if action.symbolic_text is not None:
         return f"<{action.symbolic_text}>"
     return "(none)"
+
+
+def _print_annotations(analysis: RepositoryScan) -> None:
+    typer.echo("")
+    typer.echo("Annotations")
+    typer.echo("")
+    typer.echo("  Static annotation interpretation is syntactic, not type resolution.")
+    typer.echo("")
+
+    found = False
+    current = ("", 0)
+    for item in analysis.annotations.parameters:
+        location = (item.relative_path.as_posix(), item.lineno)
+        if location != current:
+            current = location
+            found = True
+            typer.echo(f"  {location[0]}:{location[1]}  {item.target}")
+        rendered = item.rendered if item.rendered is not None else "(unannotated)"
+        typer.echo(f"    {item.parameter}: {rendered} -> {item.description}")
+
+    if not found:
+        typer.echo("  (no callable targets)")
+
+
+def _print_plans(analysis: RepositoryScan) -> None:
+    typer.echo("")
+    typer.echo("Invocation plans")
+    typer.echo("")
+    typer.echo("  One adversarial action per plan. Filler values record their origin.")
+    typer.echo("")
+
+    if not analysis.planning.plans:
+        typer.echo("  (no invocation plans)")
+        return
+
+    current = ("", 0)
+    for plan in analysis.planning.plans:
+        location = (plan.relative_path.as_posix(), plan.lineno)
+        if location != current:
+            current = location
+            typer.echo(f"  {location[0]}:{location[1]}  {plan.signature}")
+            typer.echo("")
+
+        action = plan.primary_action
+        header = f"    {action.parameter} <- {action.kind.value}"
+        if action.reference is not None:
+            header = f"{header} {action.reference}"
+        typer.echo(header)
+        for item in plan.assignments:
+            typer.echo(
+                f"      {item.parameter} = {_render_assignment(item)}"
+                f"  [{item.origin.value}, {item.placement.value}]"
+            )
+        if plan.requires_receiver:
+            typer.echo(f"      receiver: {plan.receiver_name} (not constructed)")
+        if plan.missing_parameters:
+            typer.echo(f"      missing: {', '.join(plan.missing_parameters)}")
+        typer.echo(f"      status: {plan.status.value}")
+        typer.echo("")
+
+
+def _print_strategies(analysis: RepositoryScan) -> None:
+    typer.echo("")
+    typer.echo("Strategy plans")
+    typer.echo("")
+    typer.echo("  Deterministic descriptions, not generated samples.")
+    typer.echo("")
+
+    if not analysis.planning.strategies:
+        typer.echo("  (no strategy plans)")
+        return
+
+    for entry in analysis.planning.strategies:
+        typer.echo(f"  {entry.relative_path.as_posix()}:{entry.lineno}  {entry.signature}")
+        typer.echo("")
+        for parameter in entry.parameters:
+            typer.echo(
+                f"    {parameter.parameter}: {parameter.annotation.description}"
+                f"  [{parameter.kind.value}]"
+            )
+            for value in parameter.values:
+                typer.echo(f"      {value.descriptor:<28} {value.text}")
+            if parameter.depends_on:
+                typer.echo(f"      depends on: {', '.join(parameter.depends_on)}")
+            typer.echo("")
+
+
+def _render_assignment(item: ArgumentAssignment) -> str:
+    """Render a planned argument value, or how it is left unsupplied."""
+    if item.value_text is not None:
+        return item.value_text
+    if item.placement is ArgumentPlacement.OMITTED:
+        return "(declared default)"
+    return "(unresolved)"
 
 
 def _format_location(relative_path: Path, line: int | None, column: int | None) -> str:

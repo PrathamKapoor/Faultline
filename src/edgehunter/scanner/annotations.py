@@ -141,14 +141,19 @@ def build_static_annotation(node: ast.expr | None) -> StaticAnnotation:
 
     ``node`` is taken from the repository's single existing parse, so building a
     shape costs no extra read or parse. A missing annotation is ``UNKNOWN``;
-    an unrecognized one is also ``UNKNOWN``, and keeps its rendered text.
+    an unrecognized one is also ``UNKNOWN``, and always keeps its rendered
+    text so the original syntax stays visible in reports.
     """
     if node is None:
         return UNKNOWN_ANNOTATION
-    return _from_node(node, render_source(node))
+    rendered = render_source(node)
+    shape = _from_node(node, rendered)
+    if shape.rendered is None:
+        return replace(shape, rendered=rendered)
+    return shape
 
 
-def _from_node(node: ast.expr, rendered: str) -> StaticAnnotation:
+def _from_node(node: ast.expr, rendered: str | None) -> StaticAnnotation:
     """Classify one annotation node, dispatching on its AST shape."""
     if _is_none_literal(node):
         return StaticAnnotation(kind=AnnotationKind.NONE, rendered=rendered)
@@ -156,7 +161,7 @@ def _from_node(node: ast.expr, rendered: str) -> StaticAnnotation:
         # A string literal is a forward reference such as ``"User"``. It is
         # deliberately not parsed: resolving it would require importing the
         # module that defines the name.
-        return UNKNOWN_ANNOTATION
+        return StaticAnnotation(kind=AnnotationKind.UNKNOWN, rendered=rendered)
     if isinstance(node, ast.BinOp):
         return _from_binop(node, rendered)
     if isinstance(node, ast.Subscript):
@@ -164,11 +169,11 @@ def _from_node(node: ast.expr, rendered: str) -> StaticAnnotation:
 
     name = _recognizable_name(node)
     if name is None:
-        return UNKNOWN_ANNOTATION
+        return StaticAnnotation(kind=AnnotationKind.UNKNOWN, rendered=rendered)
     return _from_name(name, rendered)
 
 
-def _from_name(name: str, rendered: str) -> StaticAnnotation:
+def _from_name(name: str, rendered: str | None) -> StaticAnnotation:
     """Classify a bare (or ``typing.``-prefixed) annotation name."""
     simple = _SIMPLE_NAMES.get(name)
     if simple is not None:
@@ -182,34 +187,34 @@ def _from_name(name: str, rendered: str) -> StaticAnnotation:
         return StaticAnnotation(kind=AnnotationKind.UNKNOWN, rendered=rendered)
     if name == "Union":
         return StaticAnnotation(kind=AnnotationKind.UNION, rendered=rendered)
-    return UNKNOWN_ANNOTATION
+    return StaticAnnotation(kind=AnnotationKind.UNKNOWN, rendered=rendered)
 
 
-def _from_subscript(node: ast.Subscript, rendered: str) -> StaticAnnotation:
+def _from_subscript(node: ast.Subscript, rendered: str | None) -> StaticAnnotation:
     """Classify a subscripted annotation such as ``list[int]``."""
     name = _recognizable_name(node.value)
     if name is None:
-        return UNKNOWN_ANNOTATION
+        return StaticAnnotation(kind=AnnotationKind.UNKNOWN, rendered=rendered)
 
     if name in _OPTIONAL_NAMES:
         inner = _single_argument(node)
         if inner is None:
-            return UNKNOWN_ANNOTATION
-        return replace(_from_node(inner, ""), nullable=True, rendered=rendered)
+            return StaticAnnotation(kind=AnnotationKind.UNKNOWN, rendered=rendered)
+        return replace(_from_node(inner, None), nullable=True, rendered=rendered)
 
     if name == "Union":
         return _from_union_arguments(node, rendered)
 
     kind = _COLLECTION_NAMES.get(name)
     if kind is None:
-        return UNKNOWN_ANNOTATION
+        return StaticAnnotation(kind=AnnotationKind.UNKNOWN, rendered=rendered)
     if kind is AnnotationKind.DICT:
         return _from_dict_subscript(node, rendered)
     return _from_sequence_subscript(kind, node, rendered)
 
 
 def _from_sequence_subscript(
-    kind: AnnotationKind, node: ast.Subscript, rendered: str
+    kind: AnnotationKind, node: ast.Subscript, rendered: str | None
 ) -> StaticAnnotation:
     """Interpret ``list[T]``, ``set[T]``, and both tuple spellings."""
     arguments = _subscript_arguments(node)
@@ -222,21 +227,21 @@ def _from_sequence_subscript(
             return StaticAnnotation(
                 kind=kind,
                 rendered=rendered,
-                element=_from_node(arguments[0], ""),
+                element=_from_node(arguments[0], None),
                 variadic=True,
             )
         if len(arguments) == 1:
             return StaticAnnotation(
-                kind=kind, rendered=rendered, element=_from_node(arguments[0], "")
+                kind=kind, rendered=rendered, element=_from_node(arguments[0], None)
             )
         # A heterogeneous fixed-length tuple such as ``tuple[int, str]`` has no
         # single element shape, so it is recorded without one.
         return StaticAnnotation(kind=kind, rendered=rendered)
 
-    return StaticAnnotation(kind=kind, rendered=rendered, element=_from_node(arguments[0], ""))
+    return StaticAnnotation(kind=kind, rendered=rendered, element=_from_node(arguments[0], None))
 
 
-def _from_dict_subscript(node: ast.Subscript, rendered: str) -> StaticAnnotation:
+def _from_dict_subscript(node: ast.Subscript, rendered: str | None) -> StaticAnnotation:
     """Interpret ``dict[K, V]``."""
     arguments = _subscript_arguments(node)
     if len(arguments) != 2:
@@ -244,21 +249,21 @@ def _from_dict_subscript(node: ast.Subscript, rendered: str) -> StaticAnnotation
     return StaticAnnotation(
         kind=AnnotationKind.DICT,
         rendered=rendered,
-        key=_from_node(arguments[0], ""),
-        value=_from_node(arguments[1], ""),
+        key=_from_node(arguments[0], None),
+        value=_from_node(arguments[1], None),
     )
 
 
-def _from_binop(node: ast.BinOp, rendered: str) -> StaticAnnotation:
+def _from_binop(node: ast.BinOp, rendered: str | None) -> StaticAnnotation:
     """Interpret a PEP 604 union such as ``int | None``.
 
     Exactly one recognized type plus ``None`` is the supported form. Anything
     else is recorded as ``UNION``, which yields no generated values.
     """
     if not isinstance(node.op, ast.BitOr):
-        return UNKNOWN_ANNOTATION
-    left = _from_node(node.left, "")
-    right = _from_node(node.right, "")
+        return StaticAnnotation(kind=AnnotationKind.UNKNOWN, rendered=rendered)
+    left = _from_node(node.left, None)
+    right = _from_node(node.right, None)
 
     if right.kind is AnnotationKind.NONE:
         return replace(left, nullable=True, rendered=rendered)
@@ -270,10 +275,10 @@ def _from_binop(node: ast.BinOp, rendered: str) -> StaticAnnotation:
     return StaticAnnotation(kind=AnnotationKind.UNION, rendered=rendered)
 
 
-def _from_union_arguments(node: ast.Subscript, rendered: str) -> StaticAnnotation:
+def _from_union_arguments(node: ast.Subscript, rendered: str | None) -> StaticAnnotation:
     """Interpret ``Union[...]`` with the same rules as PEP 604 unions."""
     arguments = _subscript_arguments(node)
-    members = [_from_node(argument, "") for argument in arguments]
+    members = [_from_node(argument, None) for argument in arguments]
     nullable = any(member.kind is AnnotationKind.NONE for member in members)
     concrete = [member for member in members if member.kind is not AnnotationKind.NONE]
 

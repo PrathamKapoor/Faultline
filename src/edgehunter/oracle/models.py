@@ -116,6 +116,14 @@ class TestExpectationCandidate:
     comparison_operator: ComparisonOperator | None = None
     expected_expression: str | None = None
     exception: str | None = None
+    literal_arguments: tuple[str, ...] = ()
+    """Positional arguments that are literals, in call order.
+
+    Only literal syntax is recorded: a fixture name, a constant reference, or a
+    constructor call is deliberately absent rather than evaluated. The text is
+    recorded untyped; a later stage knows the parameter's annotation and can
+    classify it.
+    """
 
 
 @dataclass(frozen=True, slots=True)

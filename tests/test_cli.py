@@ -49,6 +49,11 @@ def test_scan_help_exits_successfully() -> None:
     assert "--boundaries" in result.output
     assert "--risk" in result.output
     assert "--properties" in result.output
+    assert "--actions" in result.output
+    assert "--candidates" in result.output
+    assert "--annotations" in result.output
+    assert "--plans" in result.output
+    assert "--strategies" in result.output
 
 
 def test_scan_missing_argument_is_a_usage_error() -> None:
@@ -277,6 +282,9 @@ def test_scan_combines_detail_flags(tmp_path: Path) -> None:
         "--properties",
         "--actions",
         "--candidates",
+        "--annotations",
+        "--plans",
+        "--strategies",
     )
 
     assert result.exit_code == 0
@@ -286,6 +294,146 @@ def test_scan_combines_detail_flags(tmp_path: Path) -> None:
     assert "Properties" in result.output
     assert "Actions" in result.output
     assert "Candidates" in result.output
+    assert "Annotations" in result.output
+    assert "Invocation plans" in result.output
+    assert "Strategy plans" in result.output
+
+
+def test_scan_reports_planning_statistics(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x: int, name: str, user: Widget):\n"
+        "    if x > 0:\n"
+        "        return x, name, user\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path))
+
+    assert result.exit_code == 0
+    assert "Planning" in result.output
+    assert stat_value(result.output, "Parameters recognized") == 2
+    assert stat_value(result.output, "Parameters unknown") == 1
+    assert stat_value(result.output, "Invocation plans") > 0
+    # Every plan carries the unknown argument, so none is complete.
+    assert stat_value(result.output, "Complete function plans") == 0
+    assert stat_value(result.output, "Partial plans") > 0
+    assert stat_value(result.output, "Strategy plans") == 1
+
+
+def test_scan_counts_complete_function_plans(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x: int, name: str):\n    if x > 0:\n        return x, name\n    return None\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path))
+
+    assert result.exit_code == 0
+    assert stat_value(result.output, "Complete function plans") > 0
+    assert stat_value(result.output, "Partial plans") == 0
+    assert stat_value(result.output, "Needs receiver") == 0
+
+
+def test_scan_lists_annotation_shapes_with_flag(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(tags: list[int], limit: int | None, user: Widget):\n    return tags, limit, user\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path), "--annotations")
+
+    assert result.exit_code == 0
+    assert "not type resolution" in result.output
+    assert "tags: list[int] -> LIST[INT]" in result.output
+    assert "limit: int | None -> OPTIONAL[INT]" in result.output
+    assert "user: Widget -> UNKNOWN" in result.output
+
+
+def test_scan_lists_invocation_plans_with_flag(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x: int, name: str):\n    if x > 0:\n        return x, name\n    return None\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path), "--plans")
+
+    assert result.exit_code == 0
+    assert "One adversarial action per plan" in result.output
+    assert "x <- set_zero" in result.output
+    assert "[adversarial_action" in result.output
+    assert "[static_type_baseline" in result.output
+    assert "status: complete_function" in result.output
+
+
+def test_scan_shows_missing_arguments_and_unresolved_values(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x: int, user: Widget):\n    if x > 0:\n        return x, user\n    return None\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path), "--plans")
+
+    assert result.exit_code == 0
+    assert "missing: user" in result.output
+    assert "status: partial_arguments" in result.output
+
+
+def test_scan_marks_declared_defaults_and_receivers(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "class C:\n"
+        "    def f(self, x: int, limit: int = 10):\n"
+        "        if x > 0:\n"
+        "            return x, limit\n"
+        "        return limit\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path), "--plans")
+
+    assert result.exit_code == 0
+    assert "(declared default)" in result.output
+    assert "[declared_default, omitted]" in result.output
+    assert "receiver: self (not constructed)" in result.output
+    assert "status: needs_receiver" in result.output
+
+
+def test_scan_lists_strategy_plans_with_flag(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x: int, r: float):\n    if x < 10:\n        return x + r\n    return r\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path), "--strategies")
+
+    assert result.exit_code == 0
+    assert "not generated samples" in result.output
+    assert "x: INT  [sampled_from]" in result.output
+    assert "r: FLOAT  [sampled_from]" in result.output
+    assert "just_above.10" in result.output
+    assert 'float("nan")' in result.output
+
+
+def test_scan_without_phase5_flags_omits_their_sections(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text("def f(x: int):\n    return x\n", encoding="utf-8")
+
+    result = invoke("scan", str(tmp_path))
+
+    assert result.exit_code == 0
+    assert "\nAnnotations\n" not in result.output
+    assert "\nInvocation plans\n" not in result.output
+    assert "\nStrategy plans\n" not in result.output
+
+
+def test_scan_reports_empty_phase5_sections(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text("x = 1\n", encoding="utf-8")
+
+    result = invoke("scan", str(tmp_path), "--annotations", "--plans", "--strategies")
+
+    assert result.exit_code == 0
+    assert "(no callable targets)" in result.output
+    assert "(no invocation plans)" in result.output
+    assert "(no strategy plans)" in result.output
 
 
 def test_scan_reports_semantic_action_statistics(tmp_path: Path) -> None:

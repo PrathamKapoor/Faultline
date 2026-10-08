@@ -24,7 +24,8 @@ in-process:      typer.testing.CliRunner -> the typer.Typer application (used by
 ```text
 edgehunter
 ├── --version                        (eager option on the root callback `_root_callback`)
-└── scan PATH [--targets] [--boundaries] [--risk] [--properties] [--actions] [--candidates]   (command `scan`)
+└── scan PATH [--targets] [--boundaries] [--risk] [--properties] [--actions] [--candidates]
+            [--annotations] [--plans] [--strategies]        (command `scan`)
 ```
 
 ## 3. Flow: `edgehunter --version`
@@ -40,7 +41,7 @@ app()                                          src/edgehunter/cli.py  — Typer 
 Why: `is_eager=True` makes `--version` run before command resolution, so it
 works even when no command is given.
 
-## 4. Flow: `edgehunter scan PATH [--targets] [--boundaries] [--risk] [--properties] [--actions] [--candidates]`
+## 4. Flow: `edgehunter scan PATH [--targets] ... [--annotations] [--plans] [--strategies]`
 
 Where the data comes from: the `PATH` argument typed by the user (a directory
 or a single Python file) plus the optional detail flags. Nothing is read from
@@ -70,17 +71,31 @@ app()                                          src/edgehunter/cli.py — Typer a
      │   ├─ rank_profiles(profiles)              deterministic ordering
      │   ├─ select_module_actions(module, semantics)
      │   │                                     src/edgehunter/generation/actions.py — applicable actions per target
-     │   └─ build_oracle_analysis(production, expectations, modules)
-     │                                         src/edgehunter/oracle/repository.py — dedup, resolution, support
+     │   ├─ build_oracle_analysis(production, expectations, modules)
+     │   │                                     src/edgehunter/oracle/repository.py — dedup, resolution, support
+     │   ├─ build_repository_generation(action_sets)
+     │   │                                     src/edgehunter/generation/repository.py — single-action cases
+     │   ├─ build_repository_planning(generation, modules, observed_literals)
+     │   │                                     src/edgehunter/generation/planning.py — invocation plans
+     │   │       ├─ plan_case(case, function, literals)
+     │   │       │                             src/edgehunter/generation/invocation.py — baselines, placement, status
+     │   │       │   └─ baseline_for(shape)     src/edgehunter/generation/baselines.py — trustworthy fillers
+     │   │       └─ plan_strategies(path, function, actions)
+     │   │                                     src/edgehunter/generation/strategy.py — deterministic plans
+     │   └─ annotation_report(modules)         src/edgehunter/generation/planning.py — per-parameter shapes
      └─ _print_analysis(...)
          ├─ structural + semantic counts       from analysis.semantics
          ├─ _print_oracle_counts(...)           Oracle evidence block
          ├─ _print_generation_counts(...)       Semantic actions block
+         ├─ _print_planning_counts(...)         Planning block
+         ├─ _print_annotations(...)             only with --annotations
          ├─ _print_targets / _print_boundaries
          ├─ _print_risk(...)                   only with --risk
          ├─ _print_properties(...)             only with --properties
          ├─ _print_actions(...)                only with --actions
          ├─ _print_candidates(...)             only with --candidates
+         ├─ _print_plans(...)                  only with --plans
+         ├─ _print_strategies(...)             only with --strategies
          └─ _print_issues(structure)            source issues last
 ```
 
@@ -95,13 +110,16 @@ Error behavior: `ScanError` (missing path, unsupported target) prints
 `error: <message>` to stderr and exits 2 (`EXIT_INVALID_INPUT`). A scan that
 completes but finds unreadable or unparseable files exits 1
 (`EXIT_SCAN_ISSUES`). A clean scan exits 0. Oracle ambiguity, unresolved
-expectations, symbolic actions, and unsupported actions never change the exit
-code: they are analysis limitations, not malformed source. Unexpected exceptions
+expectations, symbolic actions, unsupported actions, unknown annotations, and
+incomplete invocation plans never change the exit code: they are analysis
+limitations, not malformed source. Unexpected exceptions
 propagate unchanged because they indicate bugs.
 
 Why it works this way: `pipeline.analyze_repository()` owns the single pass, so
-structure, semantics, oracles, risk, and actions all describe the same bytes and
-cost one read and one parse per file. `analysis.repository.analyze_repository_semantics()`
+structure, semantics, oracles, risk, actions, and plans all describe the same
+bytes and cost one read and one parse per file. Annotation shapes are built from
+the `ast.arg` annotation node the scanner already holds, so interpreting an
+annotation introduces no second parse. `analysis.repository.analyze_repository_semantics()`
 remains available as the Phase 2 entry point and is built from the same
 per-file helper.
 
@@ -168,29 +186,75 @@ per-file helper.
 
 ## 11. Generation rules (src/edgehunter/generation/)
 
-- The action vocabulary is closed: `SemanticActionKind` has twelve members and `BOUNDARY_ACTIONS` maps all ten `BoundaryKind` values one-to-one onto ten of them. The two collection actions have no boundary counterpart. Nothing else can be proposed.
+- The action vocabulary is closed: `SemanticActionKind` has fourteen members and `BOUNDARY_ACTIONS` maps all ten `BoundaryKind` values one-to-one onto ten of them. The other four (`SET_NONE`, `EMPTY_COLLECTION`, `SINGLETON_COLLECTION`, `DUPLICATE_ELEMENT_COLLECTION`) are annotation-driven and have no boundary counterpart. Nothing else can be proposed.
 - Every action records its origin: `BOUNDARY` (a mined candidate justified it) or `ANNOTATION` (the declared annotation did).
 - Actions are selected per parameter, deduplicated by `(parameter, kind, reference)`, and ordered by `(parameter, ACTION_KIND_ORDER, reference)`.
-- Applicability for numeric actions comes from Phase 2's boundary candidates, which already require an exact `int`/`float` annotation.
-- Applicability for collection actions requires an exact bare builtin annotation: `list`, `tuple`, `dict`, `set`, `frozenset`. Subscripted spellings (`list[int]`, `Optional[int]`) and every other annotation are `UNKNOWN` and yield nothing.
+- Applicability for numeric actions comes from Phase 2's boundary candidates, whose annotation rule now reads the static shape: a nullable `int | None` is still an integer, and `bool` is still not numeric.
+- Applicability for collection and nullability actions is decided from the static annotation shape (section 12), not from annotation text, so `list[int]`, `dict[str, int]`, and `int | None` are all recognized.
 - Annotation-derived actions are restricted to single-value parameter buckets; `*args`/`**kwargs` never receive a generic action.
 - Untyped parameters are not excluded: they still receive actions derived from their own comparisons.
 - Materialization is `CONCRETE`, `SYMBOLIC`, or `UNSUPPORTED`. Integer literal references use exact neighbours (`9`/`10`/`11`); float references use `math.nextafter` and are rendered with `repr`; other literal kinds can be matched exactly but not stepped.
 - A name or attribute reference stays symbolic: `AT_BOUNDARY` names it, and the below/above forms stay symbolic rather than inventing a neighbour.
 - Stepping around a `complex` literal is `UNSUPPORTED`. Literal text is parsed with `int`/`float`, never `eval` or `ast.literal_eval`.
-- Empty collections render as `[]`, `()`, `{}`, `set()`, `frozenset()`; singletons use a `None` placeholder element, recorded as such in `materialization_reason`.
-- A candidate case holds exactly one action. It never combines actions and never supplies a value for another parameter.
+- Empty collections render as `[]`, `()`, `{}`, `set()` unconditionally, because an empty container needs no element knowledge. A singleton or repeated element renders only from a trustworthy element baseline (`[0]`, `("",)`, `{False}`, `{"": 0}`); an unknown element type is `UNSUPPORTED` with a reason, and no placeholder element is ever fabricated.
+- A candidate case holds exactly one action. It never combines actions and never supplies a value for another parameter. Invocation planning (section 14) adds fillers above this layer without changing it.
 - `missing_parameters` lists the target's required parameters a case leaves uncovered: no default, not `*args`/`**kwargs`, not a method's `self`/`cls` receiver.
 - Completeness is `COMPLETE` (concrete, nothing required left), `PARTIAL` (concrete, other required parameters uncovered), or `SYMBOLIC` (value still depends on a name).
 - Only `CONCRETE` and `SYMBOLIC` actions become cases; an `UNSUPPORTED` action stays in the action list with its reason.
 - Cases are ordered by `(relative path, line, target, parameter, ACTION_KIND_ORDER, reference)`.
 - Nothing is executed: a materialized value is Python source text for a later phase. No candidate case is a defect claim.
 
-## 12. Diagram
+## 12. Annotation shape rules (src/edgehunter/scanner/annotations.py)
+
+- `build_static_annotation(ast_expr)` is the single canonical annotation interpreter. It runs inside `scanner/targets._build_parameter`, so it costs no extra read and no extra `ast.parse`; the result is stored on `ParameterInfo.shape`.
+- Recognized primitives: `int`, `float`, `bool`, `str`, and a bare `None`.
+- Recognized containers, bare and subscripted: `list[T]`, `set[T]`, `tuple[T]`, `tuple[T, ...]`, `dict[K, V]`. A bare `list`/`tuple`/`set`/`dict` has the container kind but no element/key/value.
+- Recognized `typing` spellings: `List[...]`, `Tuple[...]`, `Set[...]`, `Dict[...]`, `Optional[...]`, `Union[...]`, plus the `typing.`-prefixed forms of each. Recognition is syntactic; no import is resolved and nothing proves the name means what it appears to.
+- PEP 604 unions: one recognized type plus `None` becomes that type with `nullable=True`. Any other multi-type union becomes `UNION`, which generates no values.
+- `Union[X, None]` is normalized the same way as `X | None`.
+- Nullability is a flag, not a kind, so `int | None` is `kind=INT, nullable=True` and every `INT` rule still applies. `description` renders it as `OPTIONAL[INT]`.
+- Nested generics are represented recursively and do not crash; a heterogeneous fixed tuple such as `tuple[int, str]` records no element because it has no single element type.
+- Everything else is `UNKNOWN` while keeping its rendered text: forward-reference strings, user aliases (`MyInt = int`), `Annotated`, `Literal`, `NewType`, `TypeVar`, `Protocol`, `Callable`, `Sequence`, `Mapping`, `Iterable`, `frozenset`, an annotation that is a call expression, and any non-`typing` qualifier such as `mylib.List[int]`.
+- A forward-reference string is never parsed as code. An annotation expression is never evaluated.
+
+## 13. Baseline rules (src/edgehunter/generation/baselines.py)
+
+- A baseline is a filler for an argument with no adversarial intent. It is not an oracle and not a validity claim.
+- Values: `int` → `0`, `float` → `0.0`, `bool` → `False`, `str` → `""`, `None` → `None`, and the empty container for each container kind.
+- A nullable shape yields its non-null baseline, so `None` stays an adversarial choice (`SET_NONE`) rather than an automatic filler.
+- `UNKNOWN` and `UNION` yield no baseline at all. There is no `None` fallback for an unrecognized type.
+- Every baseline records a `BaselineSource` (`static_type_baseline`, `existing_test_baseline`, `declared_default`, `dependency_baseline`) and a reason stating it is a filler.
+- Filler precedence: existing-test literal, then dependency baseline, then declared default (the parameter is omitted), then static type baseline, then nothing.
+- Nothing is instantiated: no target-defined constructor is ever called.
+
+## 14. Invocation planning rules (src/edgehunter/generation/invocation.py)
+
+- Planning sits above the candidate layer: one `InvocationPlan` per `CandidateCase`, so plan count always equals case count.
+- Exactly one assignment per plan has origin `adversarial_action`. Every other assignment is a filler with its own origin, so a failure can be attributed to the action.
+- Placement comes from the Phase 1 `ParameterKind`: positional-only, positional, keyword, or omitted. `*args`/`**kwargs` receive no assignment and never affect completeness.
+- A declared default satisfies completeness without being evaluated: the parameter is recorded as `declared_default` with placement `omitted` and no value.
+- A method's `self`/`cls` is never synthesized; it sets `requires_receiver` and forces `NEEDS_RECEIVER`, so a method plan is never reported locally invocable.
+- Status precedence, most fundamental gap first: `SYMBOLIC_DEPENDENCY`, `PARTIAL_ARGUMENTS`, `NEEDS_RECEIVER`, `COMPLETE_FUNCTION`.
+- A symbolic reference resolves only when it names another parameter of the same target with a trustworthy baseline. The neighbour is computed by the same `materialize_relational()` used for literal references; there is one adjacency implementation. A dotted reference such as `self.limit` never resolves.
+- Existing-test baselines use only literal arguments recorded during mining, and only from expectations that resolved to exactly one target.
+- Plans are ordered by `(relative path, line, target, primary parameter, action kind, reference)`.
+
+## 15. Strategy plan rules (src/edgehunter/generation/strategy.py)
+
+- `StrategyPlan` describes how a parameter could be generated. It is framework-independent; no generator library is used and none is required.
+- Deterministic example sets: `int` → `0`/`1`/`-1`; `float` → those plus `-0.0`, `NaN`, `±Infinity`; `bool` → `False`/`True`; `str` → `""`, `" "`, a non-ASCII sample, `\x00`, and a 64-character string; containers reuse the materializer's empty/singleton/repeated values; a nullable shape adds `None`.
+- Boundary-derived values are labelled with the boundary and reference they came from, for example `just_above.10`.
+- Values are deduplicated by rendered text, never by equality, because `NaN != NaN` would make equality-based deduplication unpredictable for the float specials.
+- `UNKNOWN` with a symbolic dependency is `SYMBOLIC`; `UNKNOWN` without one and `UNION` are `UNSUPPORTED`.
+- `*args`/`**kwargs` receive no strategy entry.
+- Strategies exist only for targets that have at least one action.
+- No value is ever sampled or generated: the plan is a fixed, ordered table.
+
+## 16. Diagram
 
 ```mermaid
 flowchart TD
-    A["edgehunter scan PATH [--targets] [--boundaries] [--risk] [--properties] [--actions] [--candidates]"] --> B["cli.scan"]
+    A["edgehunter scan PATH [--targets ...] [--annotations] [--plans] [--strategies]"] --> B["cli.scan"]
     B --> C["pipeline.analyze_repository"]
     C --> D{"target state"}
     D -->|missing| E["PathNotFoundError → exit 2"]
@@ -200,12 +264,14 @@ flowchart TD
     H --> I{"read/parse ok?"}
     I -->|no| J["ReadIssue / SyntaxIssue"]
     I -->|yes| K["AnalyzedFile(source, module, semantics)"]
+    K --> Z["annotation_report (per-parameter shapes)"]
     K --> L["extract_production_properties"]
     K --> M["extract_test_expectations"]
     K --> N["score_module + rank_profiles"]
-    K --> O["select_module_actions (boundaries + annotations)"]
+    K --> O["select_module_actions (boundary kinds + annotation shapes)"]
     K --> P["build_oracle_analysis (resolve, dedup, support)"]
     J --> Q["RepositoryScan"]
+    Z --> Q
     L --> Q
     M --> Q
     N --> Q
@@ -284,3 +350,23 @@ flowchart TD
 | CLI | `scan` gained `--actions` and `--candidates`, a nine-line "Semantic actions" summary block, and actions/candidates before source issues | src/edgehunter/cli.py | 1500640 | D-034 |
 | tests | Added action, materialization, and candidate-case suites; extended pipeline, CLI, and safety tests | tests/test_generation_actions.py, tests/test_generation_materialize.py, tests/test_generation_cases.py, tests/test_pipeline.py, tests/test_cli.py, tests/test_safety.py | 1500640 | D-029..D-034 |
 | docs | Added decisions D-029..D-035 and updated this flow document | decisions.md, flow.md | 1500640 | none |
+
+
+## Changes in this session (Phase 5 — Static Annotation Shapes + Safe Baselines + Strategy Planning)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| scanner | Added the canonical annotation interpreter and built each shape from the `ast.arg` node during the existing traversal; stored on `ParameterInfo.shape` | src/edgehunter/scanner/annotations.py, src/edgehunter/scanner/models.py, src/edgehunter/scanner/targets.py, src/edgehunter/scanner/__init__.py | uncommitted | D-036 |
+| analysis | Boundary applicability reads the annotation shape, so nullable integers receive numeric candidates | src/edgehunter/analysis/boundaries.py | uncommitted | D-036 |
+| generation | Removed the `None` element placeholder; collection values now come from element baselines | src/edgehunter/generation/materialize.py | 4c6b922 | D-037 |
+| generation | Extended the action vocabulary with `SET_NONE` and `DUPLICATE_ELEMENT_COLLECTION`; annotation applicability keyed on shape | src/edgehunter/generation/models.py, src/edgehunter/generation/actions.py | 4c6b922 | D-038 |
+| generation | Added safe baseline synthesis with explicit provenance and fixed filler precedence | src/edgehunter/generation/baselines.py | uncommitted | D-039 |
+| generation | Added typed invocation plans: one adversarial assignment, placement, declared defaults, receiver requirement, four statuses | src/edgehunter/generation/invocation.py | uncommitted | D-040 |
+| generation | Added symbolic parameter-reference resolution reusing the one adjacency materializer | src/edgehunter/generation/invocation.py | uncommitted | D-041 |
+| generation | Added the framework-independent strategy-plan layer; Hypothesis deliberately not added | src/edgehunter/generation/strategy.py | uncommitted | D-043 |
+| generation | Added repository aggregation: one plan per case, one strategy plan per target, annotation report | src/edgehunter/generation/planning.py | uncommitted | D-040, D-043 |
+| oracle | Recorded literal-only test-call arguments for use as observed baselines | src/edgehunter/oracle/models.py, src/edgehunter/oracle/test_expectations.py | uncommitted | D-042 |
+| pipeline | `RepositoryScan` gained `planning` and `annotations`; observed literals feed the planner | src/edgehunter/pipeline.py | uncommitted | D-040, D-042 |
+| CLI | `scan` gained `--annotations`, `--plans`, `--strategies`, a Planning summary block, and plans/strategies before source issues | src/edgehunter/cli.py | uncommitted | D-044 |
+| tests | Added annotation, invocation, and strategy suites; extended boundary, action, case, CLI, pipeline, and safety tests | tests/test_annotations.py, tests/test_invocation.py, tests/test_strategy.py, tests/test_boundaries.py, tests/test_generation_actions.py, tests/test_generation_cases.py, tests/test_generation_materialize.py, tests/test_cli.py, tests/test_pipeline.py, tests/test_safety.py | uncommitted | D-036..D-044 |
+| docs | Added decisions D-039..D-044 and updated this flow document | decisions.md, flow.md | uncommitted | none |

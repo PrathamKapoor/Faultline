@@ -246,6 +246,73 @@ def test_syntax_issue_keeps_other_files_analyzed(tmp_path: Path) -> None:
     assert scan.risk.scored_target_count == 1
 
 
+def test_annotation_and_planning_do_not_add_a_second_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shapes, baselines, and plans all come from the single existing parse."""
+    write_repo(
+        tmp_path,
+        {
+            "m.py": (
+                "def f(x: int, tags: list[int], limit: int | None = None):\n"
+                "    if x <= 0:\n"
+                "        return tags\n"
+                "    return tags\n"
+            ),
+            "test_m.py": "def test_f():\n    assert f(1) == [1]\n",
+        },
+    )
+
+    reads: list[Path] = []
+    original_read = ast_parser_module._read_source
+
+    def counting_read(path: Path) -> str:
+        reads.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(ast_parser_module, "_read_source", counting_read)
+
+    scan = analyze_repository(tmp_path)
+
+    assert len(reads) == 2
+    assert scan.annotations.parameter_count == 3
+    assert scan.annotations.recognized_count == 3
+    assert scan.planning.plan_count > 0
+    assert scan.planning.strategy_plan_count > 0
+
+
+def test_planning_composes_over_the_candidate_layer(tmp_path: Path) -> None:
+    write_repo(
+        tmp_path,
+        {
+            "m.py": (
+                "def f(x: int, name: str):\n"
+                "    if x > 0:\n"
+                "        return x, name\n"
+                "    return None\n"
+            )
+        },
+    )
+
+    scan = analyze_repository(tmp_path)
+
+    # One plan per candidate case: planning adds no cases of its own.
+    assert scan.planning.plan_count == scan.generation.case_count
+    assert scan.planning.complete_plan_count == scan.generation.case_count
+    assert all(plan.primary_action.parameter == "x" for plan in scan.planning.plans)
+
+
+def test_syntax_issue_yields_no_plans(tmp_path: Path) -> None:
+    write_repo(tmp_path, {"broken.py": "def broken(\n"})
+
+    scan = analyze_repository(tmp_path)
+
+    assert scan.semantics.structure.syntax_issue_count == 1
+    assert scan.planning.plan_count == 0
+    assert scan.planning.strategy_plan_count == 0
+    assert scan.annotations.parameter_count == 0
+
+
 def test_repeated_scans_are_equal(tmp_path: Path) -> None:
     write_repo(
         tmp_path,
