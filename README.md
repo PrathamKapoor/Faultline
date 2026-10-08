@@ -25,9 +25,9 @@ An oracle-aware search over the repository:
 1. **Static analysis** — AST, types, branches, and relationships.
 2. **Property inference** — assertions, tests, docstrings, invariants.
 3. **Semantic edge search** — deterministic boundary values plus a search
-   policy that proposes constrained actions such as `NEGATE_VALUE`,
-   `CROSS_BOUNDARY`, `EMPTY_COLLECTION`, or `DUPLICATE_ELEMENT`, rather than
-   free-form generated tests.
+   policy that proposes constrained actions from a closed vocabulary, such as
+   `USE_NAN`, `AT_BOUNDARY`, `JUST_BELOW_BOUNDARY`, or `EMPTY_COLLECTION`,
+   rather than free-form generated tests.
 4. **Isolated execution** — hypotheses are executed, and an oracle decides
    whether a property holds. A model-generated statement is never proof of a
    bug; execution proves findings.
@@ -41,8 +41,8 @@ straightforward code.
 ## Current status
 
 **Early development. Structure, semantics, boundaries, structural risk ranking,
-and explicit oracle mining are implemented; the counterexample search engine is
-not.**
+explicit oracle mining, and a constrained semantic-action engine with input
+materialization are implemented; the counterexample search engine is not.**
 
 What exists today:
 
@@ -71,21 +71,34 @@ What exists today:
   strength
 - conservative target resolution for test expectations: unique names resolve,
   ambiguous names are reported as ambiguous, receiver calls stay unresolved
+- a closed semantic-action vocabulary (`SemanticActionKind`): each mined
+  boundary candidate maps onto exactly one action, and collection annotations
+  add `EMPTY_COLLECTION` / `SINGLETON_COLLECTION`
+- input materialization that writes values down as Python source text:
+  `CONCRETE` for literal references (exact integer neighbours such as
+  `99`/`100`/`101`, and adjacent floats via `math.nextafter`), `SYMBOLIC` when
+  the value depends on a name, and `UNSUPPORTED` when no value exists
+- single-action candidate cases that never invent a value for another
+  parameter, and instead report which required parameters they leave uncovered
 - structured reporting of syntax errors and unreadable files without aborting
-  the scan, plus `--targets`, `--boundaries`, `--risk`, and `--properties`
+  the scan, plus `--targets`, `--boundaries`, `--risk`, `--properties`,
+  `--actions`, and `--candidates`
 
 Safety: analyzed code is never imported or executed, including tests. The
 scanner reads text and parses it; nothing else. Annotations are matched as
-source text and never resolved. Regression tests prove module-level side
-effects in scanned files do not run, that mined test expectations are not
-executed, and that the package contains no execution primitives.
+source text and never resolved. Materialized values are source text produced
+for a later phase and are never run here. Regression tests prove module-level
+side effects in scanned files do not run, that mined test expectations are not
+executed, that materialized values are strings rather than constructed objects,
+and that the package contains no execution primitives.
 
 What does **not** exist yet: risk calibration, property inference from
 docstrings or metamorphic relations, executable test generation, execution,
 oracle evaluation, counterexamples, failure shrinking, and any model-based
-search. Two things are deliberately *not* claimed here: a boundary candidate is
-not a bug, and mined oracle evidence is not a defect — it is an explicit
-expectation a later execution stage can check.
+search. Three things are deliberately *not* claimed here: a boundary candidate
+is not a bug, mined oracle evidence is not a defect — it is an explicit
+expectation a later execution stage can check — and a candidate case is not a
+reproducing input until something actually runs it.
 
 ## Installation
 
@@ -112,32 +125,43 @@ $ edgehunter scan .
 EdgeHunter scan
   target (directory): C:\Projects\edgehunter
 
-  Python files discovered: 33
-  Parsed successfully:     33
+  Python files discovered: 41
+  Parsed successfully:     41
   Syntax issues:           0
   Read issues:             0
 
-  Classes:                 53
-  Functions:               288
-  Methods:                 51
+  Classes:                 65
+  Functions:               381
+  Methods:                 66
   Async targets:           0
-  Callable targets:        339
-  Excluded directories:    11
+  Callable targets:        447
+  Excluded directories:    12
 
-  Predicates:              733
-  Comparisons:             651
-  Arithmetic expressions:  126
-  Boundary candidates:     6
+  Predicates:              954
+  Comparisons:             857
+  Arithmetic expressions:  150
+  Boundary candidates:     19
 
   Oracle evidence
     Assertions:                   0
     Validation rules:             3
-    Resolved test expectations:   53
-    Unresolved test expectations: 24
+    Resolved test expectations:   70
+    Unresolved test expectations: 34
     Ambiguous test expectations:  5
-    Property candidates:          85
-    Strongly supported targets:   10
-    Risk-scored targets:          339
+    Property candidates:          112
+    Strongly supported targets:   14
+    Risk-scored targets:          447
+
+  Semantic actions
+    Actions proposed:          19
+    Concrete values:           12
+    Symbolic values:           7
+    Unsupported actions:       0
+    Targets with actions:      9
+    Candidate cases:           19
+    Complete cases:            0
+    Partial cases:             12
+    Symbolic cases:            7
 ```
 
 `scan --boundaries` lists boundary candidates per target. Real output for a
@@ -254,6 +278,98 @@ Properties
       reason:   unique target with this name
 ```
 
+`--actions` turns each target's boundary candidates and annotations into
+concrete, symbolic, or unsupported inputs. Real output for a small example
+project:
+
+```console
+$ edgehunter scan ./example --actions
+...
+Actions
+
+  Constrained input vocabulary. Nothing here is executed.
+
+  account.py:5
+    Account.withdraw(self, amount: float) -> float
+
+    amount
+      [boundary] just_below_boundary 0              concrete    -1
+      [boundary] just_below_boundary self.balance   symbolic    <self.balance>
+        reference 'self.balance' is a name, so no neighbour of it can be written down without knowing its runtime value
+      [boundary] at_boundary 0                      concrete    0
+      [boundary] at_boundary self.balance           symbolic    <self.balance>
+        reference 'self.balance' is a name, so its value is not known statically
+      [boundary] just_above_boundary 0              concrete    1
+      [boundary] set_zero                           concrete    0.0
+      [boundary] set_negative_zero                  concrete    -0.0
+      [boundary] use_nan                            concrete    float("nan")
+      ...
+  account.py:20
+    clamp(value: int) -> int
+
+    value
+      [boundary] just_below_boundary 0              concrete    -1
+      [boundary] just_below_boundary 10             concrete    9
+      [boundary] at_boundary 10                     concrete    10
+      [boundary] just_above_boundary 10             concrete    11
+      [boundary] set_zero                           concrete    0
+      ...
+  account.py:28
+    dedupe(seen: list, values: dict) -> list
+
+    seen
+      [annotation] empty_collection                   concrete    []
+      [annotation] singleton_collection               concrete    [None]
+    values
+      [annotation] empty_collection                   concrete    {}
+      [annotation] singleton_collection               concrete    {None: None}
+```
+
+Three things to note. `[boundary]` actions come from a comparison in the source,
+while `[annotation]` actions come only from the parameter's declared type.
+`concrete` values are Python source text for a later phase to use; `symbolic`
+values are names whose runtime value is unknown, printed in angle brackets so
+they cannot be mistaken for literals. And `math.nextafter` is used for float
+neighbours, so `clamp` gets `9` and `11` for an integer boundary while a float
+boundary such as `0.5` would get `0.49999999999999994` — the genuinely adjacent
+representable value.
+
+`--candidates` turns each action into a single-action case and states plainly
+what it does *not* supply:
+
+```console
+$ edgehunter scan ./example --candidates
+...
+Candidates
+
+  One action per case. Values for other parameters are never invented.
+
+  account.py:2
+    Account.__init__(self, balance: float) -> None
+
+      [complete] balance = 0.0                set_zero
+      [complete] balance = float("nan")       use_nan
+      ...
+
+  account.py:28
+    dedupe(seen: list, values: dict) -> list
+
+      [symbolic] seen = <values>              at_boundary values
+        missing: values
+      [partial ] seen = []                    empty_collection
+        missing: values
+      [partial ] seen = [None]                singleton_collection
+        missing: values
+      [partial ] values = {}                  empty_collection
+        missing: seen
+```
+
+`complete` means the action materialized concretely and every required parameter
+is covered. `partial` means the value is concrete but other required parameters
+are not — filling those in would mean inventing a baseline input, so EdgeHunter
+names them under `missing:` instead. `symbolic` means the value still depends on
+a name.
+
 Exit codes:
 
 ```text
@@ -304,12 +420,18 @@ src/edgehunter/
 │   ├── boundaries.py  facts + parameters -> boundary candidates
 │   ├── risk.py        explainable structural risk scoring
 │   └── models.py      immutable semantic, boundary, and risk models
-└── oracle/            oracle layer: what the code says should happen
+├── oracle/            oracle layer: what the code says should happen
+│   ├── __init__.py    public interface
+│   ├── models.py      oracle/property models and strengths
+│   ├── production.py  asserts + if/raise validation guards
+│   ├── test_expectations.py  test-file expectations + target resolution
+│   └── repository.py  dedup, resolution, per-target support
+└── generation/        action layer: which inputs are worth trying
     ├── __init__.py    public interface
-    ├── models.py      oracle/property models and strengths
-    ├── production.py  asserts + if/raise validation guards
-    ├── test_expectations.py  test-file expectations + target resolution
-    └── repository.py  dedup, resolution, per-target support
+    ├── models.py      closed action vocabulary, statuses, candidate cases
+    ├── materialize.py actions -> concrete / symbolic / unsupported values
+    ├── actions.py     applicability: boundary kinds + annotation categories
+    └── repository.py  per-target aggregation + candidate-case completeness
 ```
 
 Pipeline implemented today:
@@ -330,23 +452,38 @@ structure: targets, parameters      facts: predicates, comparisons,
           │                              ▼
           │                    analysis/boundaries.py  boundary candidates
           │                              │
-          │                              ▼
-          │                    analysis/risk.py        structural risk
-          ▼                              ▼
-oracle/production.py            oracle/test_expectations.py
-asserts, if/raise guards        test expectations (+ resolution)
-          └──────────────┬───────────────┘
-                         ▼
-              oracle/repository.py   dedup + per-target support
-                         ↓
-              pipeline.py             RepositoryScan (semantics, oracles, risk)
-                         ↓
-              cli.py                  formatted output
+          ├──────────────────────────────┴──────────────────────────┐
+          ▼                                                         ▼
+oracle/production.py                                    analysis/risk.py
+asserts, if/raise guards                                structural risk
+          │                                                         │
+          ▼                                                         │
+oracle/test_expectations.py                                           │
+test expectations (+ resolution)                                      │
+          │                                                         │
+          └──────────────────────────────┬──────────────────────────┘
+                                         ▼
+                              oracle/repository.py  dedup + per-target support
+                                         │
+                                         ▼
+                    generation/actions.py      applicable semantic actions
+                                         │      (boundary kinds + annotations)
+                                         ▼
+                    generation/materialize.py concrete / symbolic / unsupported
+                                         │
+                                         ▼
+                    generation/repository.py  candidate cases + completeness
+                                         │
+                                         ▼
+                          pipeline.py     RepositoryScan
+                                           (semantics, oracles, risk, generation)
+                                         ↓
+                          cli.py          formatted output
 ```
 
-Future subsystems (generation, execution, oracle evaluation, findings, search
-policy) will be added as new sibling packages, each with typed interfaces, once
-the features they support actually exist.
+Future subsystems (execution, oracle evaluation, findings, search policy) will be
+added as new sibling packages, each with typed interfaces, once the features they
+support actually exist.
 
 ## Development
 
@@ -370,8 +507,8 @@ mypy                        # strict type checking (configured in pyproject.toml
 - [x] structural risk ranking (explainable, capped, deterministic)
 - [x] explicit oracle/property mining (asserts, validation guards)
 - [x] basic existing-test expectation mining (`assert call == value`, `pytest.raises`)
-- [ ] semantic action engine (constrained transformations)
-- [ ] test-input materialization (symbolic boundaries → concrete candidates)
+- [x] semantic action engine (constrained transformations)
+- [x] test-input materialization (symbolic boundaries → concrete candidates)
 - [ ] property-based test generation
 - [ ] isolated execution
 - [ ] oracle evaluation

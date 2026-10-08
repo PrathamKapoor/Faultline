@@ -33,7 +33,12 @@ from edgehunter.analysis.models import (
     TargetSemantics,
     invert_comparison_operator,
 )
-from edgehunter.scanner.models import FunctionInfo, ModuleAnalysis, ParameterInfo, ParameterKind
+from edgehunter.scanner.models import (
+    SINGLE_VALUE_PARAMETER_KINDS,
+    FunctionInfo,
+    ModuleAnalysis,
+    ParameterInfo,
+)
 
 _NUMERIC_ANNOTATION_KINDS: Final[dict[str, tuple[BoundaryKind, ...]]] = {
     "int": (
@@ -54,14 +59,6 @@ _NUMERIC_ANNOTATION_KINDS: Final[dict[str, tuple[BoundaryKind, ...]]] = {
 
 _NUMERIC_CONSTANT_KINDS: Final[frozenset[ConstantKind]] = frozenset(
     {ConstantKind.INTEGER, ConstantKind.FLOAT, ConstantKind.COMPLEX}
-)
-
-_GENERIC_ELIGIBLE_PARAMETER_KINDS: Final[frozenset[ParameterKind]] = frozenset(
-    {
-        ParameterKind.POSITIONAL_ONLY,
-        ParameterKind.POSITIONAL_OR_KEYWORD,
-        ParameterKind.KEYWORD_ONLY,
-    }
 )
 
 _INEQUALITY_OPERATORS: Final[frozenset[ComparisonOperator]] = frozenset(
@@ -193,7 +190,7 @@ def mine_module_boundaries(
 def _generic_numeric_kinds(parameter: ParameterInfo) -> tuple[BoundaryKind, ...]:
     if parameter.annotation is None:
         return ()
-    if parameter.kind not in _GENERIC_ELIGIBLE_PARAMETER_KINDS:
+    if parameter.kind not in SINGLE_VALUE_PARAMETER_KINDS:
         return ()
     return _NUMERIC_ANNOTATION_KINDS.get(parameter.annotation, ())
 

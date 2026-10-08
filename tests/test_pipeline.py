@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import edgehunter.scanner.ast_parser as ast_parser_module
+from edgehunter.generation import SemanticActionKind
 from edgehunter.oracle import OracleSupport, PropertyKind, TargetResolution
 from edgehunter.pipeline import analyze_repository
 
@@ -56,7 +57,9 @@ def test_full_pipeline_reads_each_file_exactly_once(
     assert analysis.risk.scored_target_count == 2
 
 
-def test_pipeline_produces_structure_semantics_oracles_and_risk(tmp_path: Path) -> None:
+def test_pipeline_produces_structure_semantics_oracles_risk_and_actions(
+    tmp_path: Path,
+) -> None:
     write_repo(
         tmp_path,
         {
@@ -86,6 +89,66 @@ def test_pipeline_produces_structure_semantics_oracles_and_risk(tmp_path: Path) 
     assert scan.risk.scored_target_count == 1
     assert scan.risk.profiles[0].target == "withdraw"
     assert scan.risk.highest_score > 0
+    assert scan.generation.targets_with_actions == 1
+    assert scan.generation.action_count == scan.semantics.boundary_candidate_count
+    assert scan.generation.case_count == scan.generation.action_count
+
+
+def test_action_selection_does_not_add_a_second_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Actions are selected from the already-parsed AST, never by re-reading."""
+    write_repo(
+        tmp_path,
+        {
+            "m.py": (
+                "def f(x: int, items: list):\n    if x > 0:\n        return items\n    return []\n"
+            ),
+        },
+    )
+
+    reads: list[Path] = []
+    original_read = ast_parser_module._read_source
+
+    def counting_read(path: Path) -> str:
+        reads.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(ast_parser_module, "_read_source", counting_read)
+
+    scan = analyze_repository(tmp_path)
+
+    assert len(reads) == 1
+    assert scan.generation.action_count > 0
+
+
+def test_generation_is_independent_of_risk_and_oracles(tmp_path: Path) -> None:
+    """The same target yields the same actions regardless of oracle evidence."""
+    write_repo(
+        tmp_path,
+        {
+            "quiet.py": "def quiet(x: int):\n    if x > 5:\n        return x\n    return 0\n",
+            "test_quiet.py": "def test_quiet():\n    assert quiet(1) == 0\n",
+        },
+    )
+
+    scan = analyze_repository(tmp_path)
+
+    assert scan.oracles.resolved_test_expectation_count == 1
+    assert scan.generation.targets_with_actions == 1
+    kinds = {action.kind for action in scan.generation.action_sets[0].actions}
+    assert SemanticActionKind.JUST_BELOW_BOUNDARY in kinds
+    assert scan.generation.symbolic_action_count == 0
+
+
+def test_syntax_issue_yields_no_actions_for_that_file(tmp_path: Path) -> None:
+    write_repo(tmp_path, {"broken.py": "def broken(\n"})
+
+    scan = analyze_repository(tmp_path)
+
+    assert scan.semantics.structure.syntax_issue_count == 1
+    assert scan.generation.action_count == 0
+    assert scan.generation.case_count == 0
 
 
 def test_support_is_strong_for_explicit_evidence(tmp_path: Path) -> None:

@@ -275,6 +275,8 @@ def test_scan_combines_detail_flags(tmp_path: Path) -> None:
         "--boundaries",
         "--risk",
         "--properties",
+        "--actions",
+        "--candidates",
     )
 
     assert result.exit_code == 0
@@ -282,6 +284,126 @@ def test_scan_combines_detail_flags(tmp_path: Path) -> None:
     assert "Boundaries" in result.output
     assert "Structural risk" in result.output
     assert "Properties" in result.output
+    assert "Actions" in result.output
+    assert "Candidates" in result.output
+
+
+def test_scan_reports_semantic_action_statistics(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x: int, items: list):\n    if x > 0:\n        return items\n    return []\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path))
+
+    assert result.exit_code == 0
+    assert "Semantic actions" in result.output
+    assert stat_value(result.output, "Actions proposed") == 8
+    assert stat_value(result.output, "Concrete values") == 8
+    assert stat_value(result.output, "Symbolic values") == 0
+    assert stat_value(result.output, "Unsupported actions") == 0
+    assert stat_value(result.output, "Targets with actions") == 1
+    assert stat_value(result.output, "Candidate cases") == 8
+
+
+def test_scan_lists_actions_with_flag(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x: int):\n    if x > 5:\n        return x\n    return 0\n", encoding="utf-8"
+    )
+
+    result = invoke("scan", str(tmp_path), "--actions")
+
+    assert result.exit_code == 0
+    assert "Actions" in result.output
+    assert "Nothing here is executed" in result.output
+    assert "[boundary]" in result.output
+    assert "just_below_boundary 5" in result.output
+    assert "4" in result.output
+
+
+def test_scan_lists_collection_actions_from_annotations(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text("def f(items: list):\n    return items\n", encoding="utf-8")
+
+    result = invoke("scan", str(tmp_path), "--actions")
+
+    assert result.exit_code == 0
+    assert "[annotation]" in result.output
+    assert "[]" in result.output
+    assert "[None]" in result.output
+
+
+def test_scan_lists_candidates_with_flag(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x: int, rate: float = 0.1):\n    if x > 0:\n        return rate\n    return rate\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path), "--candidates")
+
+    assert result.exit_code == 0
+    assert "Candidates" in result.output
+    assert "never invented" in result.output
+    assert "[complete]" in result.output
+    assert "x = 1" in result.output
+    assert "missing: x" in result.output
+
+
+def test_scan_shows_symbolic_values_in_angle_brackets(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x: float, limit: float):\n    if x < limit:\n        return limit\n    return x\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path), "--candidates")
+
+    assert result.exit_code == 0
+    assert "[symbolic]" in result.output
+    assert "<limit>" in result.output
+
+
+def test_scan_reports_unsupported_actions_with_reason(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(z: complex):\n    if z > 1j:\n        return z\n    return 0j\n", encoding="utf-8"
+    )
+
+    result = invoke("scan", str(tmp_path), "--actions")
+
+    assert result.exit_code == 0
+    assert "unsupported" in result.output
+    assert "no neighbour of a complex literal" in result.output
+    assert stat_value(result.output, "Unsupported actions") == 2
+
+
+def test_scan_without_action_flags_omits_their_sections(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text("def f(x: int):\n    return x\n", encoding="utf-8")
+
+    result = invoke("scan", str(tmp_path))
+
+    assert result.exit_code == 0
+    assert "\nActions\n" not in result.output
+    assert "\nCandidates\n" not in result.output
+
+
+def test_scan_reports_no_actions_for_a_repository_without_evidence(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text("def f(x):\n    return x\n", encoding="utf-8")
+
+    result = invoke("scan", str(tmp_path), "--actions", "--candidates")
+
+    assert result.exit_code == 0
+    assert "(no applicable semantic actions)" in result.output
+    assert "(no candidate cases)" in result.output
+
+
+def test_section_order_places_issues_last(tmp_path: Path) -> None:
+    (tmp_path / "broken.py").write_text("def broken(\n", encoding="utf-8")
+    (tmp_path / "m.py").write_text("def f(x: int):\n    return x\n", encoding="utf-8")
+
+    result = invoke("scan", str(tmp_path), "--boundaries", "--actions", "--candidates")
+
+    assert result.exit_code == 1
+    assert result.output.index("Semantic actions") < result.output.index("\nActions\n")
+    assert result.output.index("\nActions\n") < result.output.index("\nCandidates\n")
+    assert result.output.index("\nCandidates\n") < result.output.index("\nSyntax issues\n")
 
 
 def test_oracle_ambiguity_does_not_change_exit_code(tmp_path: Path) -> None:
@@ -317,7 +439,9 @@ def test_scan_without_targets_flag_omits_listing(tmp_path: Path) -> None:
     result = invoke("scan", str(tmp_path))
 
     assert result.exit_code == 0
-    assert "Targets" not in result.output
+    # Match the section header, not the word: the summary block legitimately
+    # contains labels such as "Targets with actions".
+    assert "\nTargets\n" not in result.output
 
 
 def test_scan_syntax_issue_exits_with_code_1(tmp_path: Path) -> None:

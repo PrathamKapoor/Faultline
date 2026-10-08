@@ -7,6 +7,9 @@ from edgehunter.scanner.ast_parser import (
     parse_source_file,
 )
 from edgehunter.scanner.models import (
+    METHOD_KINDS,
+    RECEIVER_PARAMETER_NAMES,
+    SINGLE_VALUE_PARAMETER_KINDS,
     ClassInfo,
     FunctionInfo,
     ModuleAnalysis,
@@ -30,6 +33,9 @@ from edgehunter.scanner.repository import (
 from edgehunter.scanner.targets import CallableNode, collect_callable_nodes, iter_callable_body
 
 __all__ = [
+    "METHOD_KINDS",
+    "RECEIVER_PARAMETER_NAMES",
+    "SINGLE_VALUE_PARAMETER_KINDS",
     "CallableNode",
     "ClassInfo",
     "FunctionInfo",

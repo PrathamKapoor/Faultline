@@ -45,7 +45,23 @@ from edgehunter.analysis.models import (
     TargetRiskProfile,
     TargetSemantics,
 )
-from edgehunter.scanner.models import FunctionInfo, ModuleAnalysis, TargetKind
+from edgehunter.scanner.models import (
+    METHOD_KINDS,
+    RECEIVER_PARAMETER_NAMES,
+    FunctionInfo,
+    ModuleAnalysis,
+)
+
+__all__ = [
+    "MAX_SCORE",
+    "RECEIVER_PARAMETER_NAMES",
+    "count_boundary_groups",
+    "count_input_parameters",
+    "rank_profiles",
+    "score_module",
+    "score_target",
+    "source_span_lines",
+]
 
 PREDICATES_PER_POINT: Final[int] = 6
 PREDICATES_CAP: Final[int] = 30
@@ -63,12 +79,6 @@ MAX_SCORE: Final[int] = (
     PREDICATES_CAP + ARITHMETIC_CAP + BOUNDARY_GROUP_CAP + INPUT_PARAMETER_CAP + SOURCE_SPAN_CAP
 )
 
-RECEIVER_PARAMETER_NAMES: Final[frozenset[str]] = frozenset({"self", "cls"})
-
-_METHOD_KINDS: Final[frozenset[TargetKind]] = frozenset(
-    {TargetKind.METHOD, TargetKind.ASYNC_METHOD}
-)
-
 
 def count_boundary_groups(boundaries: TargetBoundaries | None) -> int:
     """Number of unique ``(parameter, reference)`` boundary groups."""
@@ -81,7 +91,7 @@ def count_input_parameters(function: FunctionInfo) -> int:
     """Number of user input parameters, excluding a method's implicit receiver."""
     parameters = list(function.parameters)
     if (
-        function.kind in _METHOD_KINDS
+        function.kind in METHOD_KINDS
         and parameters
         and parameters[0].name in RECEIVER_PARAMETER_NAMES
     ):

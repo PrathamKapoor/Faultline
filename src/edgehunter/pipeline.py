@@ -1,9 +1,9 @@
-"""Single-parse repository pipeline: structure, semantics, oracles, and risk.
+"""Single-parse repository pipeline: structure, semantics, oracles, risk, actions.
 
 This module is the composition root. It owns the one-pass loop: every
 discovered file is read and parsed exactly once, and the resulting AST feeds
-structural extraction, semantic extraction, boundary mining, oracle mining, and
-risk scoring. Later phases that need the AST must consume
+structural extraction, semantic extraction, boundary mining, oracle mining, risk
+scoring, and action selection. Later phases that need the AST must consume
 :func:`edgehunter.analysis.repository.analyze_discovered_files` rather than
 re-reading or re-parsing source.
 
@@ -22,6 +22,9 @@ from edgehunter.analysis.repository import (
     analyze_discovered_files,
 )
 from edgehunter.analysis.risk import rank_profiles, score_module
+from edgehunter.generation.actions import select_module_actions
+from edgehunter.generation.models import RepositoryGeneration, TargetActions
+from edgehunter.generation.repository import build_repository_generation
 from edgehunter.oracle.models import ProductionPropertyCandidate, TestExpectationCandidate
 from edgehunter.oracle.production import extract_production_properties
 from edgehunter.oracle.repository import RepositoryOracleAnalysis, build_oracle_analysis
@@ -35,11 +38,12 @@ from edgehunter.scanner.repository import (
 
 @dataclass(frozen=True, slots=True)
 class RepositoryScan:
-    """Everything one scan produces: structure, semantics, oracles, and risk."""
+    """Everything one scan produces: structure, semantics, oracles, risk, actions."""
 
     semantics: RepositorySemantics
     oracles: RepositoryOracleAnalysis
     risk: RepositoryRiskProfile
+    generation: RepositoryGeneration
 
 
 def analyze_repository(target: Path) -> RepositoryScan:
@@ -69,10 +73,12 @@ def analyze_discovered(
     production: list[ProductionPropertyCandidate] = []
     expectations: list[TestExpectationCandidate] = []
     profiles: list[TargetRiskProfile] = []
+    action_sets: list[TargetActions] = []
     for item in analyzed:
         production.extend(extract_production_properties(item.source, item.semantics))
         expectations.extend(extract_test_expectations(item.source))
         profiles.extend(score_module(item.module, item.semantics))
+        action_sets.extend(select_module_actions(item.module, item.semantics))
 
     return RepositoryScan(
         semantics=semantics,
@@ -82,4 +88,5 @@ def analyze_discovered(
             modules=tuple(item.module for item in analyzed),
         ),
         risk=rank_profiles(tuple(profiles)),
+        generation=build_repository_generation(tuple(action_sets)),
     )

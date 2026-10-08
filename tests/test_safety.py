@@ -112,6 +112,73 @@ def test_validation_exception_in_test_file_is_not_raised(tmp_path: Path) -> None
     assert expectation.call_expression == "parse('x')"
 
 
+def test_action_selection_never_executes_target_code(tmp_path: Path) -> None:
+    marker = tmp_path / "MUST_NOT_EXIST.txt"
+    (tmp_path / "service.py").write_text(
+        "from pathlib import Path\n"
+        "\n"
+        "def withdraw(amount: float, balance: float):\n"
+        f"    Path({str(marker)!r}).write_text(str(amount))\n"
+        "    if amount <= balance:\n"
+        "        raise ValueError(amount)\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+
+    analysis = analyze_repository_full(tmp_path)
+
+    assert not marker.exists()
+    assert analysis.generation.action_count > 0
+
+
+def test_materialized_values_are_source_text_not_executed_objects(tmp_path: Path) -> None:
+    marker = tmp_path / "MUST_NOT_EXIST.txt"
+    (tmp_path / "service.py").write_text(
+        "from pathlib import Path\n"
+        "\n"
+        "class Widget:\n"
+        "    pass\n"
+        "\n"
+        "def explode(items: list):\n"
+        f"    Path({str(marker)!r}).write_text('bad')\n"
+        "    return items\n",
+        encoding="utf-8",
+    )
+
+    analysis = analyze_repository_full(tmp_path)
+
+    values = [
+        case.action.value_text
+        for case in analysis.generation.cases
+        if case.action.value_text is not None
+    ]
+    assert values == ["[]", "[None]"]
+    assert all(isinstance(value, str) for value in values)
+    assert not marker.exists()
+
+
+def test_unrecognized_annotations_never_trigger_construction(tmp_path: Path) -> None:
+    marker = tmp_path / "MUST_NOT_EXIST.txt"
+    (tmp_path / "service.py").write_text(
+        "from pathlib import Path\n"
+        "\n"
+        "class Widget:\n"
+        f"    def __init__(self):\n        Path({str(marker)!r}).write_text('bad')\n"
+        "\n"
+        "def build(widget: Widget, payload: dict[str, int], flag: bool = False):\n"
+        "    return widget, payload, flag\n",
+        encoding="utf-8",
+    )
+
+    analysis = analyze_repository_full(tmp_path)
+
+    assert not marker.exists()
+    # ``dict[str, int]`` is deliberately not recognized in this phase, so no
+    # collection value is guessed for it and no ``Widget`` is ever constructed.
+    assert analysis.generation.action_count == 0
+    assert analysis.generation.case_count == 0
+
+
 def _call_name(func: ast.expr) -> str | None:
     if isinstance(func, ast.Name):
         return func.id

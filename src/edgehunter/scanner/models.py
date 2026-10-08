@@ -35,6 +35,21 @@ class TargetKind(str, Enum):
 
 METHOD_KINDS: frozenset[TargetKind] = frozenset({TargetKind.METHOD, TargetKind.ASYNC_METHOD})
 
+# A method's implicit receiver is supplied by the interpreter, so analyses that
+# reason about user-supplied inputs (risk scoring, candidate cases) treat it as
+# structural rather than as an input parameter.
+RECEIVER_PARAMETER_NAMES: frozenset[str] = frozenset({"self", "cls"})
+
+# Parameter buckets a caller supplies as one value per call. ``*args`` and
+# ``**kwargs`` are excluded because they bundle an unknown number of values.
+SINGLE_VALUE_PARAMETER_KINDS: frozenset[ParameterKind] = frozenset(
+    {
+        ParameterKind.POSITIONAL_ONLY,
+        ParameterKind.POSITIONAL_OR_KEYWORD,
+        ParameterKind.KEYWORD_ONLY,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ParameterInfo:

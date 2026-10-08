@@ -24,7 +24,7 @@ in-process:      typer.testing.CliRunner -> the typer.Typer application (used by
 ```text
 edgehunter
 ├── --version                        (eager option on the root callback `_root_callback`)
-└── scan PATH [--targets] [--boundaries] [--risk] [--properties]   (command `scan`)
+└── scan PATH [--targets] [--boundaries] [--risk] [--properties] [--actions] [--candidates]   (command `scan`)
 ```
 
 ## 3. Flow: `edgehunter --version`
@@ -40,7 +40,7 @@ app()                                          src/edgehunter/cli.py  — Typer 
 Why: `is_eager=True` makes `--version` run before command resolution, so it
 works even when no command is given.
 
-## 4. Flow: `edgehunter scan PATH [--targets] [--boundaries] [--risk] [--properties]`
+## 4. Flow: `edgehunter scan PATH [--targets] [--boundaries] [--risk] [--properties] [--actions] [--candidates]`
 
 Where the data comes from: the `PATH` argument typed by the user (a directory
 or a single Python file) plus the optional detail flags. Nothing is read from
@@ -48,8 +48,8 @@ the network or environment, and no target code is imported or executed.
 
 ```text
 app()                                          src/edgehunter/cli.py — Typer application entry
- └─ scan(path, targets, boundaries, risk, properties)
-                                                src/edgehunter/cli.py — command entry
+ └─ scan(path, targets, boundaries, risk, properties, actions, candidates)
+                                                 src/edgehunter/cli.py — command entry
      ├─ analyze_repository(target)             src/edgehunter/pipeline.py — composition root, ONE read+parse per file
      │   ├─ scan_repository(target)            src/edgehunter/scanner/repository.py — discovery (section 5)
      │   ├─ analyze_discovered_files(discovery)
@@ -68,16 +68,25 @@ app()                                          src/edgehunter/cli.py — Typer a
      │   ├─ extract_test_expectations(source)   src/edgehunter/oracle/test_expectations.py — test files only
      │   ├─ score_module(module, semantics)     src/edgehunter/analysis/risk.py — per-target profile
      │   ├─ rank_profiles(profiles)              deterministic ordering
+     │   ├─ select_module_actions(module, semantics)
+     │   │                                     src/edgehunter/generation/actions.py — applicable actions per target
      │   └─ build_oracle_analysis(production, expectations, modules)
      │                                         src/edgehunter/oracle/repository.py — dedup, resolution, support
      └─ _print_analysis(...)
          ├─ structural + semantic counts       from analysis.semantics
          ├─ _print_oracle_counts(...)           Oracle evidence block
+         ├─ _print_generation_counts(...)       Semantic actions block
          ├─ _print_targets / _print_boundaries
          ├─ _print_risk(...)                   only with --risk
          ├─ _print_properties(...)             only with --properties
+         ├─ _print_actions(...)                only with --actions
+         ├─ _print_candidates(...)             only with --candidates
          └─ _print_issues(structure)            source issues last
 ```
+
+`generation.repository.build_repository_generation()` converts the per-target
+action lists into the repository aggregate and into candidate cases; it runs
+inside `analyze_repository()` alongside `build_oracle_analysis()`.
 
 Where the data ends up: stdout (statistics, optional detail sections, source
 issues). Nothing is written to disk and no state is kept between invocations.
@@ -85,14 +94,14 @@ issues). Nothing is written to disk and no state is kept between invocations.
 Error behavior: `ScanError` (missing path, unsupported target) prints
 `error: <message>` to stderr and exits 2 (`EXIT_INVALID_INPUT`). A scan that
 completes but finds unreadable or unparseable files exits 1
-(`EXIT_SCAN_ISSUES`). A clean scan exits 0. Oracle ambiguity and unresolved
-expectations never change the exit code: they are analysis limitations, not
-malformed source. Unexpected exceptions propagate unchanged because they
-indicate bugs.
+(`EXIT_SCAN_ISSUES`). A clean scan exits 0. Oracle ambiguity, unresolved
+expectations, symbolic actions, and unsupported actions never change the exit
+code: they are analysis limitations, not malformed source. Unexpected exceptions
+propagate unchanged because they indicate bugs.
 
 Why it works this way: `pipeline.analyze_repository()` owns the single pass, so
-structure, semantics, oracles, and risk all describe the same bytes and cost
-one read and one parse per file. `analysis.repository.analyze_repository_semantics()`
+structure, semantics, oracles, risk, and actions all describe the same bytes and
+cost one read and one parse per file. `analysis.repository.analyze_repository_semantics()`
 remains available as the Phase 2 entry point and is built from the same
 per-file helper.
 
@@ -157,11 +166,31 @@ per-file helper.
 - Resolution: unique bare name → resolved; several → ambiguous; none → unresolved; dotted or chained receiver calls always unresolved. Unresolved evidence is retained, never discarded.
 - Properties are deduplicated per module and across the repository, keeping every evidence line sorted.
 
-## 11. Diagram
+## 11. Generation rules (src/edgehunter/generation/)
+
+- The action vocabulary is closed: `SemanticActionKind` has twelve members and `BOUNDARY_ACTIONS` maps all nine numeric/relational `BoundaryKind` values one-to-one onto actions. Nothing else can be proposed.
+- Every action records its origin: `BOUNDARY` (a mined candidate justified it) or `ANNOTATION` (the declared annotation did).
+- Actions are selected per parameter, deduplicated by `(parameter, kind, reference)`, and ordered by `(parameter, ACTION_KIND_ORDER, reference)`.
+- Applicability for numeric actions comes from Phase 2's boundary candidates, which already require an exact `int`/`float` annotation.
+- Applicability for collection actions requires an exact bare builtin annotation: `list`, `tuple`, `dict`, `set`, `frozenset`. Subscripted spellings (`list[int]`, `Optional[int]`) and every other annotation are `UNKNOWN` and yield nothing.
+- Annotation-derived actions are restricted to single-value parameter buckets; `*args`/`**kwargs` never receive a generic action.
+- Untyped parameters are not excluded: they still receive actions derived from their own comparisons.
+- Materialization is `CONCRETE`, `SYMBOLIC`, or `UNSUPPORTED`. Integer literal references use exact neighbours (`9`/`10`/`11`); float references use `math.nextafter` and are rendered with `repr`; other literal kinds can be matched exactly but not stepped.
+- A name or attribute reference stays symbolic: `AT_BOUNDARY` names it, and the below/above forms stay symbolic rather than inventing a neighbour.
+- Stepping around a `complex` literal is `UNSUPPORTED`. Literal text is parsed with `int`/`float`, never `eval` or `ast.literal_eval`.
+- Empty collections render as `[]`, `()`, `{}`, `set()`, `frozenset()`; singletons use a `None` placeholder element, recorded as such in `materialization_reason`.
+- A candidate case holds exactly one action. It never combines actions and never supplies a value for another parameter.
+- `missing_parameters` lists the target's required parameters a case leaves uncovered: no default, not `*args`/`**kwargs`, not a method's `self`/`cls` receiver.
+- Completeness is `COMPLETE` (concrete, nothing required left), `PARTIAL` (concrete, other required parameters uncovered), or `SYMBOLIC` (value still depends on a name).
+- Only `CONCRETE` and `SYMBOLIC` actions become cases; an `UNSUPPORTED` action stays in the action list with its reason.
+- Cases are ordered by `(relative path, line, target, parameter, ACTION_KIND_ORDER, reference)`.
+- Nothing is executed: a materialized value is Python source text for a later phase. No candidate case is a defect claim.
+
+## 12. Diagram
 
 ```mermaid
 flowchart TD
-    A["edgehunter scan PATH [--targets] [--boundaries] [--risk] [--properties]"] --> B["cli.scan"]
+    A["edgehunter scan PATH [--targets] [--boundaries] [--risk] [--properties] [--actions] [--candidates]"] --> B["cli.scan"]
     B --> C["pipeline.analyze_repository"]
     C --> D{"target state"}
     D -->|missing| E["PathNotFoundError → exit 2"]
@@ -174,17 +203,20 @@ flowchart TD
     K --> L["extract_production_properties"]
     K --> M["extract_test_expectations"]
     K --> N["score_module + rank_profiles"]
-    K --> O["build_oracle_analysis (resolve, dedup, support)"]
-    J --> P["RepositoryScan"]
-    L --> P
-    M --> P
-    N --> P
-    O --> P
-    P --> Q["cli._print_analysis (summary, targets, boundaries, risk, properties)"]
-    Q --> R["_print_issues"]
-    R --> S{"structure.issue_count > 0?"}
-    S -->|yes| T["exit 1"]
-    S -->|no| U["exit 0"]
+    K --> O["select_module_actions (boundaries + annotations)"]
+    K --> P["build_oracle_analysis (resolve, dedup, support)"]
+    J --> Q["RepositoryScan"]
+    L --> Q
+    M --> Q
+    N --> Q
+    O --> R["build_repository_generation (cases, completeness)"]
+    P --> Q
+    R --> Q
+    Q --> S["cli._print_analysis (summary, targets, boundaries, risk, properties, actions, candidates)"]
+    S --> T["_print_issues"]
+    T --> U{"structure.issue_count > 0?"}
+    U -->|yes| V["exit 1"]
+    U -->|no| W["exit 0"]
 ```
 
 ## Changes in this session (Phase 0: Repository Bootstrap and Engineering Foundation)
@@ -237,3 +269,18 @@ flowchart TD
 | CLI | `scan` gained `--risk` and `--properties`, an oracle-evidence summary block, and the fixed section order (issues last) | src/edgehunter/cli.py | 12d82df | D-027 |
 | tests | Added risk, production-oracle, test-expectation, and pipeline tests; extended safety and CLI tests | tests/test_risk.py, tests/test_oracle_production.py, tests/test_oracle_test_expectations.py, tests/test_pipeline.py, tests/test_safety.py, tests/test_cli.py | 12d82df | D-021..D-027 |
 | docs | Added decisions D-021..D-028 and updated this flow document | decisions.md, flow.md | 12d82df | none |
+
+## Changes in this session (Phase 4 — Semantic Action Engine + Input Materialization)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| scanner | Moved structural parameter constants up for reuse: `RECEIVER_PARAMETER_NAMES`, `SINGLE_VALUE_PARAMETER_KINDS` next to `METHOD_KINDS` | src/edgehunter/scanner/models.py, src/edgehunter/scanner/__init__.py | uncommitted | D-035 |
+| analysis | Boundary applicability now uses the shared single-value buckets; risk reuses the shared receiver names and public `METHOD_KINDS` instead of private copies | src/edgehunter/analysis/boundaries.py, src/edgehunter/analysis/risk.py | uncommitted | D-035 |
+| generation | Added the `generation` package with immutable action, materialization, and candidate models | src/edgehunter/generation/models.py, src/edgehunter/generation/__init__.py | uncommitted | D-029, D-030, D-031 |
+| generation | Added materialization of actions into concrete/symbolic/unsupported values: integer neighbours, `math.nextafter` floats, exact literal matching, symbolic names | src/edgehunter/generation/materialize.py | uncommitted | D-031, D-033 |
+| generation | Added action selection: total `BoundaryKind` → action mapping, bare-collection annotation categories, dedup, deterministic ordering | src/edgehunter/generation/actions.py | uncommitted | D-029, D-030, D-035 |
+| generation | Added repository aggregation and single-action candidate cases with `missing_parameters` and completeness | src/edgehunter/generation/repository.py | uncommitted | D-032 |
+| pipeline | `RepositoryScan` gained `generation`; action selection reuses the already-parsed AST in the same single pass | src/edgehunter/pipeline.py | uncommitted | D-029, D-032 |
+| CLI | `scan` gained `--actions` and `--candidates`, a nine-line "Semantic actions" summary block, and actions/candidates before source issues | src/edgehunter/cli.py | uncommitted | D-034 |
+| tests | Added action, materialization, and candidate-case suites; extended pipeline, CLI, and safety tests | tests/test_generation_actions.py, tests/test_generation_materialize.py, tests/test_generation_cases.py, tests/test_pipeline.py, tests/test_cli.py, tests/test_safety.py | uncommitted | D-029..D-034 |
+| docs | Added decisions D-029..D-035 and updated this flow document | decisions.md, flow.md | uncommitted | none |

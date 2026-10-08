@@ -13,6 +13,7 @@ from typing import Annotated
 import typer
 
 from edgehunter import __version__
+from edgehunter.generation.models import MaterializationStatus, SemanticAction
 from edgehunter.oracle.models import (
     ProductionPropertyCandidate,
     PropertyKind,
@@ -74,14 +75,23 @@ def scan(
         bool,
         typer.Option("--properties", help="List mined oracle and property evidence."),
     ] = False,
+    actions: Annotated[
+        bool,
+        typer.Option("--actions", help="List the constrained semantic actions per target."),
+    ] = False,
+    candidates: Annotated[
+        bool,
+        typer.Option("--candidates", help="List materialized candidate cases per target."),
+    ] = False,
 ) -> None:
     """Discover Python sources under PATH and analyze them statically.
 
     Files are parsed once with Python's ``ast`` module, then analyzed for
     structure, predicates, comparisons, arithmetic, boundary candidates, mined
-    oracle evidence, and structural risk. Analyzed code is never imported or
-    executed. The command exits with 1 when one or more files could not be read
-    or parsed; oracle ambiguity is not a source failure.
+    oracle evidence, structural risk, and constrained semantic actions. Analyzed
+    code is never imported or executed, and candidate inputs are never run. The
+    command exits with 1 when one or more files could not be read or parsed;
+    oracle ambiguity is not a source failure.
     """
     try:
         analysis = analyze_repository(path)
@@ -95,6 +105,8 @@ def scan(
         show_boundaries=boundaries,
         show_risk=risk,
         show_properties=properties,
+        show_actions=actions,
+        show_candidates=candidates,
     )
 
     if analysis.semantics.structure.issue_count:
@@ -108,6 +120,8 @@ def _print_analysis(
     show_boundaries: bool,
     show_risk: bool,
     show_properties: bool,
+    show_actions: bool,
+    show_candidates: bool,
 ) -> None:
     semantics = analysis.semantics
     structure = semantics.structure
@@ -134,6 +148,7 @@ def _print_analysis(
     typer.echo(f"  Boundary candidates:     {semantics.boundary_candidate_count}")
 
     _print_oracle_counts(analysis)
+    _print_generation_counts(analysis)
 
     if show_targets:
         _print_targets(structure)
@@ -147,7 +162,28 @@ def _print_analysis(
     if show_properties:
         _print_properties(analysis)
 
+    if show_actions:
+        _print_actions(analysis)
+
+    if show_candidates:
+        _print_candidates(analysis)
+
     _print_issues(structure)
+
+
+def _print_generation_counts(analysis: RepositoryScan) -> None:
+    generation = analysis.generation
+    typer.echo("")
+    typer.echo("  Semantic actions")
+    typer.echo(f"    Actions proposed:          {generation.action_count}")
+    typer.echo(f"    Concrete values:           {generation.concrete_action_count}")
+    typer.echo(f"    Symbolic values:           {generation.symbolic_action_count}")
+    typer.echo(f"    Unsupported actions:       {generation.unsupported_action_count}")
+    typer.echo(f"    Targets with actions:      {generation.targets_with_actions}")
+    typer.echo(f"    Candidate cases:           {generation.case_count}")
+    typer.echo(f"    Complete cases:            {generation.complete_case_count}")
+    typer.echo(f"    Partial cases:             {generation.partial_case_count}")
+    typer.echo(f"    Symbolic cases:            {generation.symbolic_case_count}")
 
 
 def _print_oracle_counts(analysis: RepositoryScan) -> None:
@@ -326,6 +362,77 @@ def _print_test_expectation(item: TestExpectationCandidate) -> None:
     typer.echo(f"      target:   {item.target if item.target is not None else 'unresolved'}")
     typer.echo(f"      reason:   {item.resolution_reason}")
     typer.echo("")
+
+
+def _print_actions(analysis: RepositoryScan) -> None:
+    typer.echo("")
+    typer.echo("Actions")
+    typer.echo("")
+    typer.echo("  Constrained input vocabulary. Nothing here is executed.")
+    typer.echo("")
+
+    found = False
+    for entry in analysis.generation.action_sets:
+        found = True
+        typer.echo(f"  {entry.relative_path.as_posix()}:{entry.lineno}")
+        typer.echo(f"    {entry.signature}")
+        typer.echo("")
+        current_parameter = ""
+        for action in entry.actions:
+            if action.parameter != current_parameter:
+                current_parameter = action.parameter
+                typer.echo(f"    {action.parameter}")
+            typer.echo(
+                f"      [{action.origin.value}] {action.description:<34} "
+                f"{action.status.value:<11} {_render_value(action)}"
+            )
+            if action.status is not MaterializationStatus.CONCRETE:
+                typer.echo(f"        {action.materialization_reason}")
+
+    if not found:
+        typer.echo("  (no applicable semantic actions)")
+
+
+def _print_candidates(analysis: RepositoryScan) -> None:
+    typer.echo("")
+    typer.echo("Candidates")
+    typer.echo("")
+    typer.echo("  One action per case. Values for other parameters are never invented.")
+    typer.echo("")
+
+    found = False
+    for entry in analysis.generation.action_sets:
+        cases = [
+            case
+            for case in analysis.generation.cases
+            if case.relative_path == entry.relative_path and case.target == entry.target
+        ]
+        if not cases:
+            continue
+        found = True
+        typer.echo(f"  {entry.relative_path.as_posix()}:{entry.lineno}")
+        typer.echo(f"    {entry.signature}")
+        typer.echo("")
+        for case in cases:
+            assignment = f"{case.parameter} = {_render_value(case.action)}"
+            typer.echo(
+                f"      [{case.completeness.value:<8}] {assignment:<28} {case.action.description}"
+            )
+            if case.missing_parameters:
+                typer.echo(f"        missing: {', '.join(case.missing_parameters)}")
+        typer.echo("")
+
+    if not found:
+        typer.echo("  (no candidate cases)")
+
+
+def _render_value(action: SemanticAction) -> str:
+    """Render a materialized value; a symbolic value is shown in angle brackets."""
+    if action.value_text is not None:
+        return action.value_text
+    if action.symbolic_text is not None:
+        return f"<{action.symbolic_text}>"
+    return "(none)"
 
 
 def _format_location(relative_path: Path, line: int | None, column: int | None) -> str:
