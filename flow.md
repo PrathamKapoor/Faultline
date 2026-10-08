@@ -23,8 +23,8 @@ in-process:      typer.testing.CliRunner -> the typer.Typer application (used by
 
 ```text
 edgehunter
-├── --version   (eager option on the root callback `_root_callback`)
-└── scan PATH   (command `scan`)
+├── --version              (eager option on the root callback `_root_callback`)
+└── scan PATH [--targets]  (command `scan`)
 ```
 
 ## 3. Flow: `edgehunter --version`
@@ -40,39 +40,47 @@ app()                                          src/edgehunter/cli.py  — Typer 
 Why: `is_eager=True` makes `--version` run before command resolution, so it
 works even when no command is given.
 
-## 4. Flow: `edgehunter scan PATH`
+## 4. Flow: `edgehunter scan PATH [--targets]`
 
 Where the data comes from: the `PATH` argument typed by the user (a directory
-or a single Python file). Nothing is read from the network or environment, and
-no target code is imported or executed.
+or a single Python file) and the optional `--targets` flag. Nothing is read
+from the network or environment, and no target code is imported or executed.
 
 ```text
 app()                                          src/edgehunter/cli.py — Typer application entry
- └─ scan(path)                                 src/edgehunter/cli.py — command entry, PATH parsed as pathlib.Path
-     ├─ scan_repository(target)                src/edgehunter/scanner/repository.py — library entry
-     │   ├─ _resolve_target(target)            canonicalizes input: expanduser() then resolve(strict=True)
-     │   │   └─ raises PathNotFoundError       when the path does not exist
-     │   │   └─ raises ScanError               when the path cannot be resolved (OSError/RuntimeError)
-     │   ├─ resolved.is_file()                 single-file target
-     │   │   ├─ rejects non-*.py with UnsupportedTargetError
-     │   │   └─ returns ScanSummary(is_file=True, python_files=(file,))
-     │   └─ _walk_python_files(resolved)       directory target: os.walk (followlinks=False)
-     │       ├─ is_excluded_directory(name)    checks EXCLUDED_DIRECTORY_NAMES and ".egg-info" suffix
-     │       ├─ dirnames[:] = kept             prunes excluded subtrees in place
-     │       └─ collects *.py files, sorted    returns (python_files, excluded_directories) tuples
-     └─ _print_scan_summary(summary)           src/edgehunter/cli.py — prints counts + "not implemented" note
+ └─ scan(path, targets)                        src/edgehunter/cli.py — command entry; PATH parsed as pathlib.Path
+     ├─ analyze_repository(target)             src/edgehunter/scanner/repository.py — library entry
+     │   ├─ scan_repository(target)            filesystem discovery (see section 5); returns ScanSummary
+     │   │   ├─ _resolve_target(target)        canonicalizes input; raises PathNotFoundError / ScanError
+     │   │   └─ _walk_python_files(resolved)   directory branch, or single-file branch; sorted file list
+     │   └─ analyze_python_file(path, rel)     src/edgehunter/scanner/ast_parser.py — once per file, discovery order
+     │       ├─ _read_source(path)             tokenize.open → PEP 263 encoding rules
+     │       │   └─ OSError/SyntaxError/UnicodeDecodeError → ReadIssue (scan continues)
+     │       ├─ ast.parse(source)              SyntaxError → SyntaxIssue (scan continues)
+     │       └─ extract_module_targets(tree)   src/edgehunter/scanner/targets.py
+     │           ├─ _visit(...)                recursive walk; scope = module/class/function
+     │           ├─ _build_function(...)       parameters, return annotation, decorators, owner, qualified name
+     │           └─ _build_class(...)          bases, decorators, qualified name
+     └─ _print_analysis(analysis, show_targets)
+         ├─ counts                             discovered/parsed/issues, classes/functions/methods/async/callable
+         ├─ _print_issues(analysis)            Syntax issues and Read issues sections when present
+         └─ _print_targets(analysis)           only with --targets; path:line plus static signature per target
 ```
 
-Where the data ends up: stdout (summary text). Nothing is written to disk and
-no state is kept between invocations.
+Where the data ends up: stdout (statistics, issues, optional target list).
+Nothing is written to disk and no state is kept between invocations.
 
-Error path: on `ScanError`, the CLI prints `error: <message>` to stderr and
-exits with code 2 (`EXIT_INVALID_INPUT`). Unexpected exceptions propagate
-unchanged (traceback, non-zero exit) because they indicate bugs.
+Error behavior: `ScanError` (missing path, unsupported target) prints
+`error: <message>` to stderr and exits 2 (`EXIT_INVALID_INPUT`). A scan that
+completes but finds unreadable or unparseable files prints the issues and
+exits 1 (`EXIT_SCAN_ISSUES`). A clean scan exits 0. Unexpected exceptions
+propagate unchanged (traceback, non-zero exit) because they indicate bugs.
 
-Why it works this way: discovery is isolated in the `scanner` package so the
-CLI stays a thin presentation layer, and the scanner never imports or executes
-target code, keeping the unsafe-execution boundary clean for a later phase.
+Why it works this way: discovery stays in `scan_repository()` (Phase 0,
+unchanged), file analysis is one pure function, and repository-level
+aggregation lives in `analyze_repository()`. The CLI only formats results, so
+each layer is testable in isolation and the no-execution boundary stays in one
+place: `analyze_python_file()` reads text and calls `ast.parse` only.
 
 ## 5. Discovery rules (policy, `src/edgehunter/scanner/repository.py`)
 
@@ -81,22 +89,39 @@ target code, keeping the unsafe-execution boundary clean for a later phase.
 - Do not follow symlinks (`os.walk` default `followlinks=False`).
 - Visit names in sorted order so results are deterministic.
 
-## 6. Diagram
+## 6. Analysis rules (src/edgehunter/scanner/ast_parser.py, targets.py, models.py)
+
+- Reading: `tokenize.open` (BOM and PEP 263 coding cookies). Failures become `ReadIssue`.
+- Parsing: `ast.parse` only; no imports, `eval`, `exec`, or subprocess of any kind.
+- Target kinds: immediate lexical scope decides method vs nested function vs function; `async def` selects the async variant. Compound statements (`if`/`try`/loops/`with`/`match`) do not change scope.
+- Qualified names: dotted lexical path within the file (`Outer.Inner.run`, `outer.inner`); no package resolution yet.
+- Ordering: files in discovery order (a directory's files before its subdirectories, each sorted); functions and classes within a module sorted by `(lineno, qualified_name)`.
+- Annotations, decorators, and bases are stored as `ast.unparse` output (source text); defaults are recorded only as `has_default`.
+- Issues: at most one `SyntaxIssue` (line/column/message from `SyntaxError`) or `ReadIssue` (exception message) per file; analysis of other files continues.
+
+## 7. Diagram
 
 ```mermaid
 flowchart TD
-    A["edgehunter scan PATH"] --> B["cli.scan"]
-    B --> C["scanner.scan_repository"]
+    A["edgehunter scan PATH [--targets]"] --> B["cli.scan"]
+    B --> C["scanner.analyze_repository"]
     C --> D{"target state"}
-    D -->|missing| E["PathNotFoundError"]
-    D -->|"non-.py file"| F["UnsupportedTargetError"]
-    D -->|".py file"| G["ScanSummary is_file=True"]
-    D -->|directory| H["_walk_python_files (os.walk + pruning)"]
-    H --> I["ScanSummary is_file=False"]
-    G --> J["cli._print_scan_summary"]
-    I --> J
-    E --> K["stderr: error: ... ; exit code 2"]
-    F --> K
+    D -->|missing| E["PathNotFoundError → exit 2"]
+    D -->|"non-.py file"| F["UnsupportedTargetError → exit 2"]
+    D -->|"directory or .py file"| G["scan_repository → sorted file list"]
+    G --> H["analyze_python_file for each file"]
+    H --> I{"read ok?"}
+    I -->|no| J["ReadIssue"]
+    I -->|yes| K{"parse ok?"}
+    K -->|no| L["SyntaxIssue"]
+    K -->|yes| M["extract_module_targets → ModuleAnalysis"]
+    J --> N["RepositoryAnalysis"]
+    L --> N
+    M --> N
+    N --> O["cli._print_analysis"]
+    O --> P{"issue_count > 0?"}
+    P -->|yes| Q["print issues → exit 1"]
+    P -->|no| R["exit 0"]
 ```
 
 ## Changes in this session (Phase 0: Repository Bootstrap and Engineering Foundation)
@@ -110,3 +135,15 @@ flowchart TD
 | tests | Added CLI tests (in-process + one subprocess entry-point test) and scanner tests | tests/test_cli.py, tests/test_repository_scanner.py | ac9b228 | D-007 |
 | docs | Created `decisions.md`, `flow.md`, `.gitignore`, `README.md` | decisions.md, flow.md, .gitignore, README.md | ac9b228 | none |
 | docs | Recorded real commit hashes in `decisions.md`/`flow.md`, added `handoff.md`, added D-008 (typer.testing-only imports) | decisions.md, flow.md, handoff.md | c729a70 | D-008 |
+
+## Changes in this session (Phase 1 — Repository Scanner + Safe AST Extraction)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| scanner | Added immutable AST models (ParameterInfo, FunctionInfo, ClassInfo, ModuleAnalysis, SyntaxIssue, ReadIssue, kinds) | src/edgehunter/scanner/models.py | uncommitted | D-009, D-010, D-012 |
+| scanner | Added scope-aware target extraction with qualified names, parameter kinds, annotations, decorators, line spans | src/edgehunter/scanner/targets.py | uncommitted | D-010 |
+| scanner | Added safe file analysis: `tokenize.open` reading, `ast.parse`, structured issues | src/edgehunter/scanner/ast_parser.py | uncommitted | D-011, D-012, D-014 |
+| scanner | Added `RepositoryAnalysis` and `analyze_repository()`; `ScanSummary`/`scan_repository()` unchanged | src/edgehunter/scanner/repository.py, src/edgehunter/scanner/__init__.py | uncommitted | D-009 |
+| CLI | `scan` prints AST statistics and issue sections, supports `--targets`, exits 1 when issues exist | src/edgehunter/cli.py | uncommitted | D-013 |
+| tests | Parser, safety, and aggregation tests; CLI tests updated for new output and exit codes | tests/test_ast_parser.py, tests/test_safety.py, tests/test_repository_analysis.py, tests/test_cli.py | uncommitted | D-010..D-014 |
+| docs | Added decisions D-009..D-014 and updated this flow document | decisions.md, flow.md | uncommitted | none |

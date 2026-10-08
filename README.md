@@ -40,21 +40,31 @@ straightforward code.
 
 ## Current status
 
-**Early development / engineering foundation. The counterexample search engine
-is not implemented yet.**
+**Early development. Repository discovery and safe static AST extraction are
+implemented; the counterexample search engine is not.**
 
 What exists today:
 
 - an installable package with a working CLI (`edgehunter --help`,
   `edgehunter --version`)
-- a `scan` command that performs safe filesystem repository discovery: it
-  counts Python files and skips virtual environments, caches, and build
-  directories; it never imports or executes the target code
+- a `scan` command that discovers Python files (skipping virtual
+  environments, caches, and build directories) and parses each one with
+  Python's `ast` module
+- structural extraction of modules, classes, functions, methods (including
+  async and nested definitions), parameters with kinds/annotations/defaults,
+  decorators, bases, and source line spans
+- structured reporting of syntax errors and unreadable/undecodable files
+  without aborting the scan, plus an optional `--targets` listing
 - a test suite, lint/format configuration, and strict type checking
 
-What does **not** exist yet: AST analysis, property inference, hypothesis
-generation, execution, oracles, minimization, and reporting. `edgehunter scan`
-prints an explicit note saying so.
+Safety: analyzed code is never imported or executed. The scanner reads text
+and parses it; nothing else. The repository contains a regression test that
+proves module-level side effects in scanned files do not run.
+
+What does **not** exist yet: branch/control-flow analysis, boundary mining,
+property inference, hypothesis generation, execution, oracles, minimization,
+and reporting. `edgehunter scan` says so in its help text and nowhere claims
+otherwise.
 
 ## Installation
 
@@ -80,18 +90,65 @@ edgehunter 0.1.0
 $ edgehunter scan .
 EdgeHunter scan
   target (directory): C:\Projects\edgehunter
-  python files discovered: 7
-  excluded directories skipped: 9
 
-Repository analysis is not implemented yet (Phase 0 foundation).
+  Python files discovered: 13
+  Parsed successfully:     13
+  Syntax issues:           0
+  Read issues:             0
+
+  Classes:                 14
+  Functions:               81
+  Methods:                 19
+  Async targets:           0
+  Callable targets:        100
+  Excluded directories:    9
 ```
 
-`scan` accepts a directory or a single `.py` file. Invalid input fails cleanly
-with exit code 2 and no traceback:
+`scan --targets` lists every callable target with its location and a static
+signature (defaults are rendered as `...`; nothing is executed). Excerpt from
+a small example project:
+
+```console
+$ edgehunter scan ./example --targets
+...
+Targets
+
+  app/account.py:2
+    Account.__init__(self, balance: float = ...) -> None
+  app/account.py:5
+    Account.withdraw(self, amount: float) -> float
+  app/account.py:9
+    async Account.refresh(self) -> None
+  app/api.py:5
+    list_users(limit: int = ..., *, include_inactive: bool = ...) -> list[Any]
+  app/api.py:10
+    outer.inner() -> int
+```
+
+Exit codes:
+
+```text
+0  scan completed and every discovered Python file parsed
+1  scan completed but one or more files could not be read or parsed
+2  invalid input, such as a missing path or an unsupported file target
+```
+
+Invalid input fails cleanly with no traceback:
 
 ```console
 $ edgehunter scan ./does-not-exist
 error: path does not exist: does-not-exist
+```
+
+When a file cannot be parsed, the scan reports it and continues with the rest:
+
+```console
+$ edgehunter scan ./example
+...
+Syntax issues
+
+  broken.py:1:11
+    '(' was never closed
 ```
 
 ## Architecture
@@ -105,11 +162,29 @@ src/edgehunter/
 ├── cli.py             Typer application: argument parsing and output only
 └── scanner/
     ├── __init__.py    public scanner interface
-    └── repository.py  filesystem discovery (no AST analysis, no execution)
+    ├── repository.py  filesystem discovery + repository-level aggregation
+    ├── models.py      immutable models (targets, parameters, issues)
+    ├── targets.py     AST -> classes/callables (scope-aware, qualified names)
+    └── ast_parser.py  safe source reading + ast.parse + structured issues
 ```
 
-The CLI is a thin presentation layer; library modules do not print. Future
-subsystems (analysis, oracle, search, generators, execution, findings,
+Pipeline implemented today:
+
+```text
+repository path
+    ↓
+repository.py        discovery (deterministic, excludes venvs/caches/build dirs)
+    ↓
+ast_parser.py        tokenize.open → ast.parse → issues on failure
+    ↓
+targets.py           functions/classes/methods/parameters/annotations/decorators
+    ↓
+models.py            immutable ModuleAnalysis per file
+    ↓
+repository.py        RepositoryAnalysis aggregate → cli.py output
+```
+
+Future subsystems (analysis, oracle, search, generators, execution, findings,
 retrieval, training) will be added as sibling packages to `scanner`, each with
 typed interfaces, once the features they support actually exist.
 
@@ -125,9 +200,13 @@ mypy                        # strict type checking (configured in pyproject.toml
 
 ## Roadmap
 
-- [x] project foundation (packaging, CLI, repository discovery, tests, docs)
-- [ ] repository scanner + AST extraction
+- [x] engineering foundation (packaging, CLI, tests, docs)
+- [x] repository discovery
+- [x] safe AST parsing with structured syntax/read issues
+- [x] structural target extraction (functions, classes, methods, parameters)
+- [ ] control-flow / branch analysis
 - [ ] boundary mining
+- [ ] risk scoring
 - [ ] property extraction from assertions, tests, and docstrings
 - [ ] semantic action engine (constrained transformations)
 - [ ] isolated execution engine
