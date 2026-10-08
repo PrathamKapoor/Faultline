@@ -47,6 +47,8 @@ def test_scan_help_exits_successfully() -> None:
     assert "PATH" in result.output
     assert "--targets" in result.output
     assert "--boundaries" in result.output
+    assert "--risk" in result.output
+    assert "--properties" in result.output
 
 
 def test_scan_missing_argument_is_a_usage_error() -> None:
@@ -164,6 +166,135 @@ def test_scan_boundaries_reports_when_no_candidates_exist(tmp_path: Path) -> Non
 
     assert result.exit_code == 0
     assert "(no boundary candidates)" in result.output
+
+
+def test_scan_reports_oracle_statistics(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x):\n    if x < 0:\n        raise ValueError\n    assert x >= 0\n    return x\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_m.py").write_text(
+        "def test_f():\n    assert f(1) == 1\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path))
+
+    assert result.exit_code == 0
+    assert stat_value(result.output, "Assertions") == 1
+    assert stat_value(result.output, "Validation rules") == 1
+    assert stat_value(result.output, "Resolved test expectations") == 1
+    assert stat_value(result.output, "Unresolved test expectations") == 0
+    assert stat_value(result.output, "Ambiguous test expectations") == 0
+    assert stat_value(result.output, "Property candidates") == 3
+    assert stat_value(result.output, "Strongly supported targets") == 1
+    assert stat_value(result.output, "Risk-scored targets") == 2
+
+
+def test_scan_lists_risk_with_flag(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def risky(a: int, b: int):\n    if a > 0:\n        return a * b\n", encoding="utf-8"
+    )
+
+    result = invoke("scan", str(tmp_path), "--risk")
+
+    assert result.exit_code == 0
+    assert "Structural risk" in result.output
+    assert "not a probability of a bug" in result.output
+    assert "risky" in result.output
+    assert "m.py:1" in result.output
+    assert "predicates" in result.output
+    assert "+6" in result.output
+
+
+def test_scan_without_risk_flag_omits_risk_section(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text("def f(x):\n    ...\n", encoding="utf-8")
+
+    result = invoke("scan", str(tmp_path))
+
+    assert result.exit_code == 0
+    assert "Structural risk" not in result.output
+
+
+def test_scan_lists_properties_with_flag(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x):\n"
+        "    if x < 0:\n"
+        "        raise ValueError('negative')\n"
+        "    assert x >= 0, 'must be non-negative'\n"
+        "    return x\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path), "--properties")
+
+    assert result.exit_code == 0
+    assert "Properties" in result.output
+    assert "not confirmed defects" in result.output
+    assert "[STRONG] asserted_condition" in result.output
+    assert "x >= 0" in result.output
+    assert "must be non-negative" in result.output
+    assert "[STRONG] rejection_rule" in result.output
+    assert "raises ValueError" in result.output
+    assert "Oracle support by target" in result.output
+
+
+def test_scan_properties_shows_unresolved_expectation_reason(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text("def other():\n    ...\n", encoding="utf-8")
+    (tmp_path / "test_m.py").write_text(
+        "def test_other():\n    assert service.other() == 1\n", encoding="utf-8"
+    )
+
+    result = invoke("scan", str(tmp_path), "--properties")
+
+    assert result.exit_code == 0
+    assert "[unresolved]" in result.output
+    assert "receiver resolution not implemented" in result.output
+
+
+def test_scan_properties_report_empty_sections(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text("def f(x):\n    return x\n", encoding="utf-8")
+
+    result = invoke("scan", str(tmp_path), "--properties")
+
+    assert result.exit_code == 0
+    assert "(no production assertions or validation guards)" in result.output
+    assert "(no test expectations recognized)" in result.output
+    assert "(no target has explicit oracle evidence)" in result.output
+
+
+def test_scan_combines_detail_flags(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        "def f(x: int):\n    assert x >= 0\n    return x * 2\n", encoding="utf-8"
+    )
+
+    result = invoke(
+        "scan",
+        str(tmp_path),
+        "--targets",
+        "--boundaries",
+        "--risk",
+        "--properties",
+    )
+
+    assert result.exit_code == 0
+    assert "Targets" in result.output
+    assert "Boundaries" in result.output
+    assert "Structural risk" in result.output
+    assert "Properties" in result.output
+
+
+def test_oracle_ambiguity_does_not_change_exit_code(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("def parse(v):\n    ...\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("def parse(v):\n    ...\n", encoding="utf-8")
+    (tmp_path / "test_parse.py").write_text(
+        "def test_parse():\n    assert parse('x') is None\n", encoding="utf-8"
+    )
+
+    result = invoke("scan", str(tmp_path))
+
+    assert result.exit_code == 0
+    assert stat_value(result.output, "Ambiguous test expectations") == 1
 
 
 def test_scan_lists_targets_with_flag(tmp_path: Path) -> None:

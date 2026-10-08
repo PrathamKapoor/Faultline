@@ -12,9 +12,17 @@ from pathlib import Path
 
 from edgehunter.analysis.models import ModuleSemantics, TargetBoundaries
 from edgehunter.analysis.semantics import extract_module_semantics
-from edgehunter.scanner.ast_parser import build_module_analysis, parse_source_file
+from edgehunter.scanner.ast_parser import (
+    SourceFile,
+    build_module_analysis,
+    parse_source_file,
+)
 from edgehunter.scanner.models import ModuleAnalysis
-from edgehunter.scanner.repository import RepositoryAnalysis, scan_repository
+from edgehunter.scanner.repository import (
+    RepositoryAnalysis,
+    ScanSummary,
+    scan_repository,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +63,43 @@ class RepositorySemantics:
         return len(self.boundaries)
 
 
+@dataclass(frozen=True, slots=True)
+class AnalyzedFile:
+    """Structure, semantics, and parsed AST for one file.
+
+    Internal pipeline state: it carries the parsed ``SourceFile`` so later stages
+    (oracle mining) reuse the same read and parse instead of re-reading source.
+    """
+
+    source: SourceFile
+    module: ModuleAnalysis
+    semantics: ModuleSemantics
+
+
+def analyze_discovered_files(discovery: ScanSummary) -> tuple[AnalyzedFile, ...]:
+    """Read and parse every discovered file once, deriving structure and semantics.
+
+    The parsed AST is shared with later stages through :class:`AnalyzedFile`.
+    Files are processed in discovery order, so results are deterministic for a
+    given filesystem state.
+    """
+    base = discovery.target.parent if discovery.is_file else discovery.target
+
+    analyzed: list[AnalyzedFile] = []
+    for path in discovery.python_files:
+        relative_path = path.relative_to(base)
+        source = parse_source_file(path, relative_path)
+        module = build_module_analysis(source)
+        analyzed.append(
+            AnalyzedFile(
+                source=source,
+                module=module,
+                semantics=extract_module_semantics(source, module),
+            )
+        )
+    return tuple(analyzed)
+
+
 def analyze_repository_semantics(target: Path) -> RepositorySemantics:
     """Discover, parse, and analyze Python sources under ``target``.
 
@@ -65,16 +110,12 @@ def analyze_repository_semantics(target: Path) -> RepositorySemantics:
     be read or parsed contributes a structured issue instead of facts.
     """
     discovery = scan_repository(target)
-    base = discovery.target.parent if discovery.is_file else discovery.target
-
-    module_analyses: list[ModuleAnalysis] = []
-    module_semantics: list[ModuleSemantics] = []
-    for path in discovery.python_files:
-        relative_path = path.relative_to(base)
-        source = parse_source_file(path, relative_path)
-        module_analysis = build_module_analysis(source)
-        module_analyses.append(module_analysis)
-        module_semantics.append(extract_module_semantics(source, module_analysis))
-
-    structure = RepositoryAnalysis(discovery=discovery, modules=tuple(module_analyses))
-    return RepositorySemantics(structure=structure, modules=tuple(module_semantics))
+    analyzed = analyze_discovered_files(discovery)
+    structure = RepositoryAnalysis(
+        discovery=discovery,
+        modules=tuple(item.module for item in analyzed),
+    )
+    return RepositorySemantics(
+        structure=structure,
+        modules=tuple(item.semantics for item in analyzed),
+    )

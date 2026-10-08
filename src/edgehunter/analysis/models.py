@@ -42,6 +42,26 @@ class ComparisonOperator(str, Enum):
     NOT_IN = "not in"
 
 
+INVERTIBLE_COMPARISON_OPERATORS: Final[dict[ComparisonOperator, ComparisonOperator]] = {
+    ComparisonOperator.LESS_THAN: ComparisonOperator.GREATER_THAN,
+    ComparisonOperator.LESS_THAN_OR_EQUAL: ComparisonOperator.GREATER_THAN_OR_EQUAL,
+    ComparisonOperator.GREATER_THAN: ComparisonOperator.LESS_THAN,
+    ComparisonOperator.GREATER_THAN_OR_EQUAL: ComparisonOperator.LESS_THAN_OR_EQUAL,
+    ComparisonOperator.EQUAL: ComparisonOperator.EQUAL,
+    ComparisonOperator.NOT_EQUAL: ComparisonOperator.NOT_EQUAL,
+}
+
+
+def invert_comparison_operator(operator: ComparisonOperator) -> ComparisonOperator | None:
+    """Return the equivalent operator with the two sides swapped.
+
+    ``None`` means the reversal is not provably equivalent and the caller must
+    not rewrite the comparison. ``is``, ``is not``, ``in``, and ``not in`` are
+    deliberately excluded.
+    """
+    return INVERTIBLE_COMPARISON_OPERATORS.get(operator)
+
+
 class ArithmeticOperator(str, Enum):
     """Binary arithmetic operators recorded on arithmetic expressions."""
 
@@ -280,3 +300,60 @@ class ModuleSemantics:
     def boundary_candidate_count(self) -> int:
         """Number of boundary candidates in this module."""
         return sum(len(entry.candidates) for entry in self.boundaries)
+
+
+class RiskFeatureKind(str, Enum):
+    """One explainable component of a target's structural search priority."""
+
+    PREDICATES = "predicates"
+    ARITHMETIC = "arithmetic"
+    BOUNDARY_GROUPS = "boundary_groups"
+    INPUT_PARAMETERS = "input_parameters"
+    SOURCE_SPAN = "source_span"
+
+
+@dataclass(frozen=True, slots=True)
+class RiskContribution:
+    """Points contributed by one risk feature, with a human-readable reason."""
+
+    kind: RiskFeatureKind
+    points: int
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class TargetRiskProfile:
+    """Explainable structural search-priority score for one callable target.
+
+    This is a deterministic heuristic for allocating testing budget. It is not
+    a probability, not a bug estimate, and not a security severity.
+    """
+
+    target: str
+    relative_path: Path
+    lineno: int
+    signature: str
+    score: int
+    contributions: tuple[RiskContribution, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryRiskProfile:
+    """Structural risk profiles for every callable target, ranked."""
+
+    profiles: tuple[TargetRiskProfile, ...]
+
+    @property
+    def scored_target_count(self) -> int:
+        """Number of targets that received a risk profile."""
+        return len(self.profiles)
+
+    @property
+    def highest_score(self) -> int:
+        """Highest structural score in the repository, or 0 when there are none."""
+        return max((profile.score for profile in self.profiles), default=0)
+
+    @property
+    def targets_with_score_above_zero(self) -> int:
+        """Number of targets whose score exceeds zero."""
+        return sum(1 for profile in self.profiles if profile.score > 0)

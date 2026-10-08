@@ -1,0 +1,206 @@
+"""Tests for the single-parse pipeline and cross-stage aggregation."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+import edgehunter.scanner.ast_parser as ast_parser_module
+from edgehunter.oracle import OracleSupport, PropertyKind, TargetResolution
+from edgehunter.pipeline import analyze_repository
+
+
+def write_repo(tmp_path: Path, files: dict[str, str]) -> None:
+    for name, source in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+
+
+def test_full_pipeline_reads_each_file_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole pipeline must not re-read source for oracle mining.
+
+    Counting reads is sufficient to bound parsing too: parsing needs the source
+    text, so a second parse of a file would necessarily require a second read.
+    Patching ``ast.parse`` itself is not viable because it is a process-global
+    module attribute that the test runner also uses.
+    """
+    write_repo(
+        tmp_path,
+        {
+            "m.py": "def add(a, b):\n    return a + b\n",
+            "test_m.py": "def test_add():\n    assert add(1, 2) == 3\n",
+        },
+    )
+
+    reads: list[Path] = []
+    original_read = ast_parser_module._read_source
+
+    def counting_read(path: Path) -> str:
+        reads.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(ast_parser_module, "_read_source", counting_read)
+
+    analysis = analyze_repository(tmp_path)
+
+    assert len(reads) == 2
+    # Phase 2 semantics remain file-agnostic: the test file's own assert is a
+    # predicate, while oracle mining treats it as a test expectation instead.
+    assert analysis.semantics.predicate_count == 1
+    assert analysis.oracles.assertion_count == 0
+    assert analysis.oracles.resolved_test_expectation_count == 1
+    assert analysis.risk.scored_target_count == 2
+
+
+def test_pipeline_produces_structure_semantics_oracles_and_risk(tmp_path: Path) -> None:
+    write_repo(
+        tmp_path,
+        {
+            "account.py": (
+                "def withdraw(balance: float, amount: float) -> float:\n"
+                "    if amount < 0:\n"
+                "        raise ValueError('amount must be non-negative')\n"
+                "\n"
+                "    assert balance >= 0\n"
+                "\n"
+                "    if amount <= balance:\n"
+                "        return balance - amount\n"
+                "\n"
+                "    return balance\n"
+            )
+        },
+    )
+
+    scan = analyze_repository(tmp_path)
+
+    assert scan.semantics.structure.python_file_count == 1
+    assert scan.semantics.predicate_count == 3
+    assert scan.semantics.boundary_candidate_count > 0
+    assert scan.oracles.assertion_count == 1
+    assert scan.oracles.validation_rule_count == 1
+    assert scan.oracles.property_candidate_count == 2
+    assert scan.risk.scored_target_count == 1
+    assert scan.risk.profiles[0].target == "withdraw"
+    assert scan.risk.highest_score > 0
+
+
+def test_support_is_strong_for_explicit_evidence(tmp_path: Path) -> None:
+    write_repo(
+        tmp_path,
+        {
+            "m.py": "def f(x):\n    assert x >= 0\n",
+            "test_m.py": "def test_f():\n    assert f(1) == 1\n",
+        },
+    )
+
+    scan = analyze_repository(tmp_path)
+
+    assert len(scan.oracles.support) == 1
+    support = scan.oracles.support[0]
+    assert support.target == "f"
+    assert support.level is OracleSupport.STRONG
+    assert support.assertion_count == 1
+    assert support.validation_rule_count == 0
+    assert support.resolved_test_expectation_count == 1
+    assert scan.oracles.strongly_supported_target_count == 1
+
+
+def test_target_without_evidence_has_no_support_entry(tmp_path: Path) -> None:
+    write_repo(tmp_path, {"m.py": "def plain(x):\n    return x\n"})
+
+    scan = analyze_repository(tmp_path)
+
+    assert scan.oracles.support == ()
+    assert scan.oracles.strongly_supported_target_count == 0
+    assert scan.oracles.property_candidate_count == 0
+
+
+def test_risk_and_oracle_support_are_independent(tmp_path: Path) -> None:
+    write_repo(
+        tmp_path,
+        {
+            "m.py": (
+                "def quiet(x):\n"
+                "    assert x >= 0\n"
+                "    return x\n"
+                "\n"
+                "def busy(a: int, b: int, c: int):\n"
+                "    total = 0\n"
+                "    if a > 0:\n"
+                "        if b > 1:\n"
+                "            if c > 2:\n"
+                "                total = a * b\n"
+                "    return total\n"
+            )
+        },
+    )
+
+    scan = analyze_repository(tmp_path)
+    profiles = {profile.target: profile for profile in scan.risk.profiles}
+    supported = {entry.target for entry in scan.oracles.support}
+
+    # The asserted target scores lower than the unasserted busy target.
+    assert profiles["quiet"].score < profiles["busy"].score
+    assert "quiet" in supported
+    assert "busy" not in supported
+
+
+def test_ambiguous_resolution_does_not_create_source_failure(tmp_path: Path) -> None:
+    write_repo(
+        tmp_path,
+        {
+            "a.py": "def parse(value):\n    ...\n",
+            "b.py": "def parse(value):\n    ...\n",
+            "test_parse.py": "def test_parse():\n    assert parse('x') is None\n",
+        },
+    )
+
+    scan = analyze_repository(tmp_path)
+
+    assert scan.semantics.structure.issue_count == 0
+    assert scan.oracles.ambiguous_test_expectation_count == 1
+    assert scan.oracles.resolved_test_expectation_count == 0
+    assert scan.oracles.unresolved_test_expectation_count == 0
+    expectation = scan.oracles.test_expectations[0]
+    assert expectation.resolution is TargetResolution.AMBIGUOUS
+    assert expectation.kind is PropertyKind.EXAMPLE_EXPECTATION
+
+
+def test_syntax_issue_keeps_other_files_analyzed(tmp_path: Path) -> None:
+    write_repo(
+        tmp_path,
+        {"broken.py": "def broken(\n", "m.py": "def f(x):\n    assert x >= 0\n"},
+    )
+
+    scan = analyze_repository(tmp_path)
+
+    assert scan.semantics.structure.syntax_issue_count == 1
+    assert scan.oracles.assertion_count == 1
+    assert scan.risk.scored_target_count == 1
+
+
+def test_repeated_scans_are_equal(tmp_path: Path) -> None:
+    write_repo(
+        tmp_path,
+        {
+            "m.py": "def f(x: int):\n    if x > 0:\n        return x * 2\n",
+            "test_m.py": "def test_f():\n    assert f(1) == 2\n",
+        },
+    )
+
+    assert analyze_repository(tmp_path) == analyze_repository(tmp_path)
+
+
+def test_single_file_target_is_supported(tmp_path: Path) -> None:
+    target = tmp_path / "solo.py"
+    target.write_text("def f(x):\n    assert x >= 0\n", encoding="utf-8")
+
+    scan = analyze_repository(target)
+
+    assert scan.semantics.structure.is_file is True
+    assert scan.oracles.assertion_count == 1
+    assert scan.risk.profiles[0].relative_path == Path("solo.py")

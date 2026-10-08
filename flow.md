@@ -24,7 +24,7 @@ in-process:      typer.testing.CliRunner -> the typer.Typer application (used by
 ```text
 edgehunter
 ├── --version                        (eager option on the root callback `_root_callback`)
-└── scan PATH [--targets] [--boundaries]   (command `scan`)
+└── scan PATH [--targets] [--boundaries] [--risk] [--properties]   (command `scan`)
 ```
 
 ## 3. Flow: `edgehunter --version`
@@ -40,7 +40,7 @@ app()                                          src/edgehunter/cli.py  — Typer 
 Why: `is_eager=True` makes `--version` run before command resolution, so it
 works even when no command is given.
 
-## 4. Flow: `edgehunter scan PATH [--targets] [--boundaries]`
+## 4. Flow: `edgehunter scan PATH [--targets] [--boundaries] [--risk] [--properties]`
 
 Where the data comes from: the `PATH` argument typed by the user (a directory
 or a single Python file) plus the optional detail flags. Nothing is read from
@@ -48,47 +48,53 @@ the network or environment, and no target code is imported or executed.
 
 ```text
 app()                                          src/edgehunter/cli.py — Typer application entry
- └─ scan(path, targets, boundaries)            src/edgehunter/cli.py — command entry; PATH parsed as pathlib.Path
-     ├─ analyze_repository_semantics(target)   src/edgehunter/analysis/repository.py — library entry; reads and parses each file once
+ └─ scan(path, targets, boundaries, risk, properties)
+                                                src/edgehunter/cli.py — command entry
+     ├─ analyze_repository(target)             src/edgehunter/pipeline.py — composition root, ONE read+parse per file
      │   ├─ scan_repository(target)            src/edgehunter/scanner/repository.py — discovery (section 5)
-     │   ├─ parse_source_file(path, rel)       src/edgehunter/scanner/ast_parser.py — read + parse ONCE per file
-     │   │   └─ _read_source(path)             tokenize.open → PEP 263 encoding rules
-     │   │       └─ OSError/SyntaxError/UnicodeDecodeError → ReadIssue
-     │   │   └─ ast.parse(source)              SyntaxError → SyntaxIssue
-     │   │       └─ returns SourceFile(tree | None)
-     │   ├─ build_module_analysis(source)      src/edgehunter/scanner/ast_parser.py — structural facts from the same AST
-     │   │   └─ extract_module_targets(tree)   src/edgehunter/scanner/targets.py
-     │   │       ├─ _build_function(...)       parameters, annotations, decorators, owner, qualified name
-     │   │       └─ _build_class(...)          bases, decorators, qualified name
-     │   └─ extract_module_semantics(source, module)
-     │       │                                 src/edgehunter/analysis/semantics.py
-     │       ├─ collect_callable_nodes(tree)   src/edgehunter/scanner/targets.py — same qualified names as structure
-     │       ├─ _target_semantics(item)        per callable: predicates, comparisons, constants, arithmetic
-     │       └─ mine_module_boundaries(module, targets)
-     │                                         src/edgehunter/analysis/boundaries.py — candidates per target
-     └─ _print_analysis(analysis, show_targets=..., show_boundaries=...)
-         ├─ structural counts                 read from analysis.structure (Phase 1 statistics)
-         ├─ semantic counts                   Predicates / Comparisons / Arithmetic expressions / Boundary candidates
-         ├─ _print_issues(structure)           Syntax issues and Read issues sections when present
-         ├─ _print_targets(structure)          only with --targets
-         └─ _print_boundaries(analysis)       only with --boundaries; grouped by parameter
+     │   ├─ analyze_discovered_files(discovery)
+     │   │                                     src/edgehunter/analysis/repository.py — per-file stage
+     │   │   ├─ parse_source_file(path, rel)   src/edgehunter/scanner/ast_parser.py — read + parse ONCE
+     │   │   │   └─ _read_source(path)         tokenize.open → PEP 263 encoding rules
+     │   │   │       └─ OSError/SyntaxError/UnicodeDecodeError → ReadIssue
+     │   │   │   └─ ast.parse(source)          SyntaxError → SyntaxIssue → SourceFile(tree | None)
+     │   │   ├─ build_module_analysis(source)  structural facts from the same AST
+     │   │   │   └─ extract_module_targets(tree)  src/edgehunter/scanner/targets.py
+     │   │   └─ extract_module_semantics(source, module)
+     │   │       └─ mine_module_boundaries(module, targets)  src/edgehunter/analysis/boundaries.py
+     │   │   → AnalyzedFile(source, module, semantics)
+     │   ├─ extract_production_properties(source, semantics)
+     │   │                                     src/edgehunter/oracle/production.py — asserts + if/raise guards
+     │   ├─ extract_test_expectations(source)   src/edgehunter/oracle/test_expectations.py — test files only
+     │   ├─ score_module(module, semantics)     src/edgehunter/analysis/risk.py — per-target profile
+     │   ├─ rank_profiles(profiles)              deterministic ordering
+     │   └─ build_oracle_analysis(production, expectations, modules)
+     │                                         src/edgehunter/oracle/repository.py — dedup, resolution, support
+     └─ _print_analysis(...)
+         ├─ structural + semantic counts       from analysis.semantics
+         ├─ _print_oracle_counts(...)           Oracle evidence block
+         ├─ _print_targets / _print_boundaries
+         ├─ _print_risk(...)                   only with --risk
+         ├─ _print_properties(...)             only with --properties
+         └─ _print_issues(structure)            source issues last
 ```
 
-Where the data ends up: stdout (statistics, issues, optional target and
-boundary listings). Nothing is written to disk and no state is kept between
-invocations.
+Where the data ends up: stdout (statistics, optional detail sections, source
+issues). Nothing is written to disk and no state is kept between invocations.
 
 Error behavior: `ScanError` (missing path, unsupported target) prints
 `error: <message>` to stderr and exits 2 (`EXIT_INVALID_INPUT`). A scan that
-completes but finds unreadable or unparseable files prints the issues and
-exits 1 (`EXIT_SCAN_ISSUES`). A clean scan exits 0. Unexpected exceptions
-propagate unchanged (traceback, non-zero exit) because they indicate bugs; a
-bug inside semantic analysis is never converted into a "source issue".
+completes but finds unreadable or unparseable files exits 1
+(`EXIT_SCAN_ISSUES`). A clean scan exits 0. Oracle ambiguity and unresolved
+expectations never change the exit code: they are analysis limitations, not
+malformed source. Unexpected exceptions propagate unchanged because they
+indicate bugs.
 
-Why it works this way: one read/parse per file feeds both extractors, so the
-structural and semantic views of a file cannot disagree. Discovery stays in
-`scan_repository()`, file analysis stays in `scanner`, semantics and boundary
-mining live in `analysis`, and the CLI only formats results.
+Why it works this way: `pipeline.analyze_repository()` owns the single pass, so
+structure, semantics, oracles, and risk all describe the same bytes and cost
+one read and one parse per file. `analysis.repository.analyze_repository_semantics()`
+remains available as the Phase 2 entry point and is built from the same
+per-file helper.
 
 ## 5. Discovery rules (policy, `src/edgehunter/scanner/repository.py`)
 
@@ -131,30 +137,54 @@ mining live in `analysis`, and the CLI only formats results.
 - Deduplicated by `(parameter, kind, reference)` per target, keeping every evidence line; ordered by `(parameter, kind rank, reference)`.
 - No candidate is a bug claim: language is "candidate", "boundary", "interesting region", "static evidence".
 
-## 9. Diagram
+## 9. Structural risk rules (src/edgehunter/analysis/risk.py)
+
+- A search-priority heuristic, explicitly not a probability or bug estimate; total capped at 100.
+- Contributions and caps: predicates +6 each (cap 30), arithmetic +4 each (cap 20), boundary groups +4 each (cap 20), input parameters +3 each (cap 15), source span +3 per started block of 20 lines (cap 15).
+- A boundary group is a unique `(parameter, reference)` pair, so below/at/above for one reference count once and a float's generic numeric values count once.
+- Source span uses the scanner's `lineno`/`end_lineno`, falling back to a single line; no source is re-read.
+- A method's first `self`/`cls` parameter is not counted as user input.
+- Ranking: score descending, then relative POSIX path, then line, then qualified name.
+- Risk is independent of oracle support; neither is derived from the other.
+
+## 10. Oracle mining rules (src/edgehunter/oracle/)
+
+- Strength is categorical (`strong`), never a numeric confidence; no calibration exists.
+- Production: `assert` predicates (reusing Phase 2 facts) plus the literal/rendered message, and `if COND: raise EXC` guards whose body is exactly one `raise`.
+- Exception syntax: bare name, convention-suffixed name call (`Error`/`Exception`/`Warning`), or dotted call; anything else records no exception type.
+- Test files (`test_*.py`, `*_test.py`) are excluded from production mining; their asserts are mined as expectations.
+- Expectations: `assert <call> <op> <expected>` (reversed form normalized only for safely invertible operators) and `with pytest.raises(X):` with a single direct call body.
+- Resolution: unique bare name → resolved; several → ambiguous; none → unresolved; dotted or chained receiver calls always unresolved. Unresolved evidence is retained, never discarded.
+- Properties are deduplicated per module and across the repository, keeping every evidence line sorted.
+
+## 11. Diagram
 
 ```mermaid
 flowchart TD
-    A["edgehunter scan PATH [--targets] [--boundaries]"] --> B["cli.scan"]
-    B --> C["analysis.analyze_repository_semantics"]
+    A["edgehunter scan PATH [--targets] [--boundaries] [--risk] [--properties]"] --> B["cli.scan"]
+    B --> C["pipeline.analyze_repository"]
     C --> D{"target state"}
     D -->|missing| E["PathNotFoundError → exit 2"]
     D -->|"non-.py file"| F["UnsupportedTargetError → exit 2"]
     D -->|"directory or .py file"| G["scan_repository → deterministic file list"]
-    G --> H["parse_source_file (read + parse once)"]
+    G --> H["analyze_discovered_files (read + parse once)"]
     H --> I{"read/parse ok?"}
     I -->|no| J["ReadIssue / SyntaxIssue"]
-    I -->|yes| K["same ast.Module"]
-    K --> L["build_module_analysis (structure)"]
-    K --> M["extract_module_semantics (facts)"]
-    M --> N["mine_module_boundaries (candidates)"]
-    L --> O["RepositorySemantics(structure, modules)"]
-    N --> O
-    J --> O
-    O --> P["cli._print_analysis"]
-    P --> Q{"structure.issue_count > 0?"}
-    Q -->|yes| R["print issues → exit 1"]
-    Q -->|no| S["exit 0"]
+    I -->|yes| K["AnalyzedFile(source, module, semantics)"]
+    K --> L["extract_production_properties"]
+    K --> M["extract_test_expectations"]
+    K --> N["score_module + rank_profiles"]
+    K --> O["build_oracle_analysis (resolve, dedup, support)"]
+    J --> P["RepositoryScan"]
+    L --> P
+    M --> P
+    N --> P
+    O --> P
+    P --> Q["cli._print_analysis (summary, targets, boundaries, risk, properties)"]
+    Q --> R["_print_issues"]
+    R --> S{"structure.issue_count > 0?"}
+    S -->|yes| T["exit 1"]
+    S -->|no| U["exit 0"]
 ```
 
 ## Changes in this session (Phase 0: Repository Bootstrap and Engineering Foundation)
@@ -194,3 +224,16 @@ flowchart TD
 | CLI | `scan` prints semantic statistics, gained `--boundaries`; exit codes unchanged | src/edgehunter/cli.py | b538557 | D-019 |
 | tests | Added semantic extraction, boundary mining, repository aggregation, semantic no-execution, and CLI tests | tests/test_semantics.py, tests/test_boundaries.py, tests/test_semantic_repository.py, tests/test_safety.py, tests/test_cli.py | b538557 | D-016..D-020 |
 | docs | Added decisions D-015..D-020 and updated this flow document | decisions.md, flow.md | b538557 | none |
+| docs | Recorded Phase 2 commit hash in `decisions.md`/`flow.md`, rewrote `handoff.md` | decisions.md, flow.md, handoff.md | 603b709 | none |
+
+## Changes in this session (Phase 3 — Risk Scoring + Oracle / Property Mining)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| pipeline | Extracted the single parse pass into `analyze_discovered_files()`/`AnalyzedFile` and added the `pipeline.py` composition root | src/edgehunter/analysis/repository.py, src/edgehunter/pipeline.py | uncommitted | D-021 |
+| analysis | Added explainable structural risk scoring with capped contributions, boundary grouping, receiver exclusion, and deterministic ranking | src/edgehunter/analysis/risk.py, src/edgehunter/analysis/models.py, src/edgehunter/analysis/__init__.py | uncommitted | D-022 |
+| oracle | Added the `oracle` package: models, production mining, test-expectation mining, repository aggregation | src/edgehunter/oracle/__init__.py, src/edgehunter/oracle/models.py, src/edgehunter/oracle/production.py, src/edgehunter/oracle/test_expectations.py, src/edgehunter/oracle/repository.py | uncommitted | D-023..D-026 |
+| scanner | Shared primitives: comparison inversion moved to `analysis/models.py`, added `iter_callable_body()` and `source_lineno()` | src/edgehunter/analysis/models.py, src/edgehunter/analysis/boundaries.py, src/edgehunter/scanner/targets.py, src/edgehunter/scanner/rendering.py, src/edgehunter/scanner/__init__.py | uncommitted | D-028 |
+| CLI | `scan` gained `--risk` and `--properties`, an oracle-evidence summary block, and the fixed section order (issues last) | src/edgehunter/cli.py | uncommitted | D-027 |
+| tests | Added risk, production-oracle, test-expectation, and pipeline tests; extended safety and CLI tests | tests/test_risk.py, tests/test_oracle_production.py, tests/test_oracle_test_expectations.py, tests/test_pipeline.py, tests/test_safety.py, tests/test_cli.py | uncommitted | D-021..D-027 |
+| docs | Added decisions D-021..D-028 and updated this flow document | decisions.md, flow.md | uncommitted | none |

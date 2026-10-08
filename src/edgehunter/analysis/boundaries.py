@@ -31,6 +31,7 @@ from edgehunter.analysis.models import (
     ExpressionKind,
     TargetBoundaries,
     TargetSemantics,
+    invert_comparison_operator,
 )
 from edgehunter.scanner.models import FunctionInfo, ModuleAnalysis, ParameterInfo, ParameterKind
 
@@ -77,15 +78,8 @@ _EQUALITY_OPERATORS: Final[frozenset[ComparisonOperator]] = frozenset(
 )
 
 # Only inequality and equality are invertible; `is` and `in` are deliberately
-# not reversed (see D-018).
-_INVERTIBLE_OPERATORS: Final[dict[ComparisonOperator, ComparisonOperator]] = {
-    ComparisonOperator.LESS_THAN: ComparisonOperator.GREATER_THAN,
-    ComparisonOperator.LESS_THAN_OR_EQUAL: ComparisonOperator.GREATER_THAN_OR_EQUAL,
-    ComparisonOperator.GREATER_THAN: ComparisonOperator.LESS_THAN,
-    ComparisonOperator.GREATER_THAN_OR_EQUAL: ComparisonOperator.LESS_THAN_OR_EQUAL,
-    ComparisonOperator.EQUAL: ComparisonOperator.EQUAL,
-    ComparisonOperator.NOT_EQUAL: ComparisonOperator.NOT_EQUAL,
-}
+# not reversed (see D-018). The table itself lives in models.py so oracle
+# mining can reuse exactly the same rule.
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,7 +210,7 @@ def _normalize(
     if comparison.left.kind is ExpressionKind.NAME and comparison.left.text in parameter_names:
         subject, operator, reference = comparison.left, comparison.operator, comparison.right
     elif comparison.right.kind is ExpressionKind.NAME and comparison.right.text in parameter_names:
-        inverted = _INVERTIBLE_OPERATORS.get(comparison.operator)
+        inverted = invert_comparison_operator(comparison.operator)
         if inverted is None:
             return None
         subject, operator, reference = comparison.right, inverted, comparison.left

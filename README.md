@@ -40,17 +40,16 @@ straightforward code.
 
 ## Current status
 
-**Early development. Repository discovery, safe static AST extraction, semantic
-fact extraction, and deterministic boundary mining are implemented; the
-counterexample search engine is not.**
+**Early development. Structure, semantics, boundaries, structural risk ranking,
+and explicit oracle mining are implemented; the counterexample search engine is
+not.**
 
 What exists today:
 
 - an installable package with a working CLI (`edgehunter --help`,
   `edgehunter --version`)
-- a `scan` command that discovers Python files (skipping virtual
-  environments, caches, and build directories) and parses each one with
-  Python's `ast` module — each file is read and parsed exactly once
+- safe repository discovery and a single read + `ast.parse` per file feeding
+  every later stage
 - structural extraction of modules, classes, functions, methods (including
   async and nested definitions), parameters with kinds/annotations/defaults,
   decorators, bases, and source line spans
@@ -61,19 +60,32 @@ What exists today:
 - deterministic boundary candidates: symbolic regions worth testing, such as
   "amount just below/at/just above balance", plus generic numeric regions
   (`0`, `1`, `-1`, and for floats `-0.0`, `NaN`, `±Infinity`)
-- structured reporting of syntax errors and unreadable/undecodable files
-  without aborting the scan, plus `--targets` and `--boundaries` detail views
-- a test suite, lint/format configuration, and strict type checking
+- an explainable structural risk score per callable target: five capped
+  contributions (predicates, arithmetic, boundary groups, input parameters,
+  source span), deterministic ranking, and an explicit statement that it is a
+  search-priority heuristic rather than a probability of a bug
+- oracle mining from statements the repository itself writes: production
+  `assert` conditions, conservative `if ...: raise` validation guards, and a
+  small subset of existing test expectations (`assert call == value` and
+  `with pytest.raises(...)`), each with file/line provenance and a categorical
+  strength
+- conservative target resolution for test expectations: unique names resolve,
+  ambiguous names are reported as ambiguous, receiver calls stay unresolved
+- structured reporting of syntax errors and unreadable files without aborting
+  the scan, plus `--targets`, `--boundaries`, `--risk`, and `--properties`
 
-Safety: analyzed code is never imported or executed. The scanner reads text
-and parses it; nothing else. Annotations are matched as source text and never
-resolved. Regression tests prove module-level side effects in scanned files do
-not run and that the package contains no execution primitives.
+Safety: analyzed code is never imported or executed, including tests. The
+scanner reads text and parses it; nothing else. Annotations are matched as
+source text and never resolved. Regression tests prove module-level side
+effects in scanned files do not run, that mined test expectations are not
+executed, and that the package contains no execution primitives.
 
-What does **not** exist yet: risk scoring, property/oracle inference, test
-generation, execution, counterexamples, failure shrinking, and any model-based
-search. Boundary candidates are **not** bugs: they are regions a future
-generator should attack, and nothing here claims a defect exists.
+What does **not** exist yet: risk calibration, property inference from
+docstrings or metamorphic relations, executable test generation, execution,
+oracle evaluation, counterexamples, failure shrinking, and any model-based
+search. Two things are deliberately *not* claimed here: a boundary candidate is
+not a bug, and mined oracle evidence is not a defect — it is an explicit
+expectation a later execution stage can check.
 
 ## Installation
 
@@ -100,22 +112,32 @@ $ edgehunter scan .
 EdgeHunter scan
   target (directory): C:\Projects\edgehunter
 
-  Python files discovered: 22
-  Parsed successfully:     22
+  Python files discovered: 33
+  Parsed successfully:     33
   Syntax issues:           0
   Read issues:             0
 
-  Classes:                 36
-  Functions:               175
-  Methods:                 41
+  Classes:                 53
+  Functions:               288
+  Methods:                 51
   Async targets:           0
-  Callable targets:        216
-  Excluded directories:    10
+  Callable targets:        339
+  Excluded directories:    11
 
-  Predicates:              465
-  Comparisons:             408
-  Arithmetic expressions:  88
+  Predicates:              733
+  Comparisons:             651
+  Arithmetic expressions:  126
   Boundary candidates:     6
+
+  Oracle evidence
+    Assertions:                   0
+    Validation rules:             3
+    Resolved test expectations:   53
+    Unresolved test expectations: 24
+    Ambiguous test expectations:  5
+    Property candidates:          85
+    Strongly supported targets:   10
+    Risk-scored targets:          339
 ```
 
 `scan --boundaries` lists boundary candidates per target. Real output for a
@@ -168,9 +190,69 @@ Boundaries
 Two things to note in that output. Boundaries are **symbolic**: `amount` is
 "at `self.balance`", never `self.balance - 1`, because the correct step depends
 on a type that this phase deliberately does not resolve. And scanning
-EdgeHunter's own source yields only 6 candidates because almost nothing is
+EdgeHunter's own source yields few boundary candidates because almost nothing is
 annotated exactly `int` or `float`; generic numeric candidates require that
 literal annotation.
+
+`--risk` ranks targets by the structural score and always shows why. Real
+output for a small example project:
+
+```console
+$ edgehunter scan ./example --risk
+...
+Structural risk
+  Search-priority heuristic, not a probability of a bug.
+
+   40  account.py:5
+      Account.withdraw(self, amount: float) -> float
+      predicates         +18  3 predicate(s), +6 each (cap 30)
+      arithmetic         +4   1 arithmetic expression(s), +4 each (cap 20)
+      boundary_groups    +12  3 boundary group(s), +4 each (cap 20)
+      input_parameters   +3   1 input parameter(s), +3 each (cap 15)
+      source_span        +3   11 line(s) span, 1 block(s) of 20, +3 each (cap 15)
+
+   24  account.py:18
+      discount(total: float) -> float
+      ...
+```
+
+`--properties` lists mined oracle evidence with provenance, including evidence
+whose target could not be resolved:
+
+```console
+$ edgehunter scan ./example --properties
+...
+Properties
+
+  Mined evidence, not confirmed defects.
+
+  Production
+
+    [STRONG] rejection_rule  Account.withdraw
+      evidence: account.py:6
+      when:      amount < 0
+      expected:  raises ValueError
+
+    [STRONG] asserted_condition  Account.withdraw
+      evidence: account.py:9
+      condition: self.balance >= 0
+
+  Existing test expectations
+
+    [STRONG] example_raises  [unresolved]
+      evidence: test_account.py:7
+      expect:   Account(100).withdraw(-1) raises ValueError
+      callee:   Account(100).withdraw
+      target:   unresolved
+      reason:   receiver resolution not implemented
+
+    [STRONG] example_expectation  [resolved]
+      evidence: test_account.py:16
+      expect:   discount(99) == 99
+      callee:   discount
+      target:   discount
+      reason:   unique target with this name
+```
 
 Exit codes:
 
@@ -207,19 +289,27 @@ src/edgehunter/
 ├── __init__.py        package metadata (version)
 ├── __main__.py        `python -m edgehunter` entry point
 ├── cli.py             Typer application: argument parsing and output only
+├── pipeline.py        composition root: one read + parse per file
 ├── scanner/           structural layer: what exists
 │   ├── __init__.py    public interface
 │   ├── repository.py  discovery + RepositoryAnalysis
 │   ├── ast_parser.py  safe read/parse (SourceFile) + structural facts
-│   ├── targets.py     AST -> functions/classes (scope-aware, qualified names)
+│   ├── targets.py     callables + lexical scope helpers
 │   ├── models.py      immutable structural models
-│   └── rendering.py   shared ast.unparse rendering
-└── analysis/          semantic layer: what the code cares about
+│   └── rendering.py   render_source(), source_lineno()
+├── analysis/          semantic layer: what the code cares about
+│   ├── __init__.py    public interface
+│   ├── repository.py  per-file analysis + RepositorySemantics
+│   ├── semantics.py   AST -> predicates, comparisons, constants, arithmetic
+│   ├── boundaries.py  facts + parameters -> boundary candidates
+│   ├── risk.py        explainable structural risk scoring
+│   └── models.py      immutable semantic, boundary, and risk models
+└── oracle/            oracle layer: what the code says should happen
     ├── __init__.py    public interface
-    ├── repository.py  analyze_repository_semantics (structure + semantics)
-    ├── semantics.py   AST -> predicates, comparisons, constants, arithmetic
-    ├── boundaries.py  facts + parameters -> boundary candidates
-    └── models.py      immutable semantic and boundary models
+    ├── models.py      oracle/property models and strengths
+    ├── production.py  asserts + if/raise validation guards
+    ├── test_expectations.py  test-file expectations + target resolution
+    └── repository.py  dedup, resolution, per-target support
 ```
 
 Pipeline implemented today:
@@ -229,25 +319,34 @@ repository path
     ↓
 scanner/repository.py    discovery (deterministic, excludes venvs/caches/build)
     ↓
-scanner/ast_parser.py     tokenize.open → ast.parse  (once per file)
+scanner/ast_parser.py     tokenize.open → ast.parse   (once per file)
     ↓
           ┌──────────────┴───────────────┐
           ▼                              ▼
 scanner/targets.py                 analysis/semantics.py
 structure: targets, parameters      facts: predicates, comparisons,
                                      constants, arithmetic
+          │                              │
+          │                              ▼
+          │                    analysis/boundaries.py  boundary candidates
+          │                              │
+          │                              ▼
+          │                    analysis/risk.py        structural risk
+          ▼                              ▼
+oracle/production.py            oracle/test_expectations.py
+asserts, if/raise guards        test expectations (+ resolution)
           └──────────────┬───────────────┘
                          ▼
-            analysis/boundaries.py    boundary candidates (symbolic)
+              oracle/repository.py   dedup + per-target support
                          ↓
-            analysis/repository.py    RepositorySemantics (one read/parse per file)
+              pipeline.py             RepositoryScan (semantics, oracles, risk)
                          ↓
-            cli.py                     formatted output
+              cli.py                  formatted output
 ```
 
-Future subsystems (oracle/property mining, risk scoring, search policy,
-generation, execution, findings) will be added as new sibling packages, each
-with typed interfaces, once the features they support actually exist.
+Future subsystems (generation, execution, oracle evaluation, findings, search
+policy) will be added as new sibling packages, each with typed interfaces, once
+the features they support actually exist.
 
 ## Development
 
@@ -263,17 +362,21 @@ mypy                        # strict type checking (configured in pyproject.toml
 
 - [x] engineering foundation (packaging, CLI, tests, docs)
 - [x] repository discovery
-- [x] safe AST parsing with structured syntax/read issues
+- [x] safe AST extraction with structured syntax/read issues
 - [x] structural target extraction (functions, classes, methods, parameters)
 - [x] predicate and comparison extraction (`if`, `while`, `assert`)
 - [x] simple arithmetic extraction (maximal expressions, operators, context)
 - [x] deterministic boundary mining (symbolic comparison and generic numeric)
-- [ ] risk-based target prioritization
-- [ ] property/oracle extraction (assertions, docstrings, test expectations)
+- [x] structural risk ranking (explainable, capped, deterministic)
+- [x] explicit oracle/property mining (asserts, validation guards)
+- [x] basic existing-test expectation mining (`assert call == value`, `pytest.raises`)
 - [ ] semantic action engine (constrained transformations)
-- [ ] test generation
+- [ ] test-input materialization (symbolic boundaries → concrete candidates)
+- [ ] property-based test generation
 - [ ] isolated execution
+- [ ] oracle evaluation
 - [ ] failure shrinking
+- [ ] adaptive neighborhood search
 - [ ] learned search policy
 
 ## Documentation

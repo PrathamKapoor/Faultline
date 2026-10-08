@@ -9,6 +9,7 @@ resolved, and no model claims that a discovered candidate is a defect.
 from edgehunter.analysis.boundaries import mine_module_boundaries, mine_target_boundaries
 from edgehunter.analysis.models import (
     BOUNDARY_KIND_ORDER,
+    INVERTIBLE_COMPARISON_OPERATORS,
     ArithmeticContext,
     ArithmeticInfo,
     ArithmeticOperator,
@@ -24,14 +25,36 @@ from edgehunter.analysis.models import (
     ModuleSemantics,
     PredicateInfo,
     PredicateKind,
+    RepositoryRiskProfile,
+    RiskContribution,
+    RiskFeatureKind,
     TargetBoundaries,
+    TargetRiskProfile,
     TargetSemantics,
+    invert_comparison_operator,
 )
-from edgehunter.analysis.repository import RepositorySemantics, analyze_repository_semantics
+from edgehunter.analysis.repository import (
+    AnalyzedFile,
+    RepositorySemantics,
+    analyze_discovered_files,
+    analyze_repository_semantics,
+)
+from edgehunter.analysis.risk import (
+    MAX_SCORE,
+    count_boundary_groups,
+    count_input_parameters,
+    rank_profiles,
+    score_module,
+    score_target,
+    source_span_lines,
+)
 from edgehunter.analysis.semantics import extract_module_semantics
 
 __all__ = [
     "BOUNDARY_KIND_ORDER",
+    "INVERTIBLE_COMPARISON_OPERATORS",
+    "MAX_SCORE",
+    "AnalyzedFile",
     "ArithmeticContext",
     "ArithmeticInfo",
     "ArithmeticOperator",
@@ -47,11 +70,23 @@ __all__ = [
     "ModuleSemantics",
     "PredicateInfo",
     "PredicateKind",
+    "RepositoryRiskProfile",
     "RepositorySemantics",
+    "RiskContribution",
+    "RiskFeatureKind",
     "TargetBoundaries",
+    "TargetRiskProfile",
     "TargetSemantics",
+    "analyze_discovered_files",
     "analyze_repository_semantics",
+    "count_boundary_groups",
+    "count_input_parameters",
     "extract_module_semantics",
+    "invert_comparison_operator",
     "mine_module_boundaries",
     "mine_target_boundaries",
+    "rank_profiles",
+    "score_module",
+    "score_target",
+    "source_span_lines",
 ]

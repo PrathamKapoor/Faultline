@@ -27,7 +27,7 @@ from edgehunter.scanner.repository import (
     is_excluded_directory,
     scan_repository,
 )
-from edgehunter.scanner.targets import CallableNode, collect_callable_nodes
+from edgehunter.scanner.targets import CallableNode, collect_callable_nodes, iter_callable_body
 
 __all__ = [
     "CallableNode",
@@ -50,6 +50,7 @@ __all__ = [
     "build_module_analysis",
     "collect_callable_nodes",
     "is_excluded_directory",
+    "iter_callable_body",
     "parse_source_file",
     "render_source",
     "scan_repository",

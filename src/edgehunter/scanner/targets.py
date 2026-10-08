@@ -11,6 +11,7 @@ scope.
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 
@@ -64,6 +65,27 @@ def collect_callable_nodes(tree: ast.Module) -> tuple[CallableNode, ...]:
     """
     callables, _ = _collect(tree)
     return tuple(callables)
+
+
+def iter_callable_body(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> Iterator[ast.AST]:
+    """Yield every node inside a callable body, stopping at nested scopes.
+
+    Nested functions, nested classes, and lambdas are skipped entirely, so a
+    consumer that walks this iterator sees exactly the nodes that belong to
+    this callable. Nodes are yielded in deterministic depth-first source order.
+    """
+    stack: list[ast.AST] = [*reversed(node.body)]
+    while stack:
+        current = stack.pop()
+        if isinstance(
+            current,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+        ):
+            continue
+        yield current
+        stack.extend(reversed(list(ast.iter_child_nodes(current))))
 
 
 def _collect(tree: ast.Module) -> tuple[list[CallableNode], list[ClassInfo]]:
