@@ -46,6 +46,7 @@ def test_scan_help_exits_successfully() -> None:
     assert result.exit_code == 0
     assert "PATH" in result.output
     assert "--targets" in result.output
+    assert "--boundaries" in result.output
 
 
 def test_scan_missing_argument_is_a_usage_error() -> None:
@@ -99,6 +100,70 @@ def test_scan_reports_ast_statistics(tmp_path: Path) -> None:
     assert stat_value(result.output, "Methods") == 2
     assert stat_value(result.output, "Async targets") == 1
     assert stat_value(result.output, "Callable targets") == 3
+
+
+def test_scan_reports_semantic_statistics(tmp_path: Path) -> None:
+    (tmp_path / "bank.py").write_text(
+        "def withdraw(balance: float, amount: float) -> float:\n"
+        "    if amount <= balance:\n"
+        "        return balance - amount\n"
+        "    return balance\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path))
+
+    assert result.exit_code == 0
+    assert stat_value(result.output, "Predicates") == 1
+    assert stat_value(result.output, "Comparisons") == 1
+    assert stat_value(result.output, "Arithmetic expressions") == 1
+    assert stat_value(result.output, "Boundary candidates") == 17
+
+
+def test_scan_lists_boundaries_with_flag(tmp_path: Path) -> None:
+    (tmp_path / "bank.py").write_text(
+        "def withdraw(balance: float, amount: float) -> float:\n"
+        "    if amount <= balance:\n"
+        "        return balance - amount\n"
+        "    return balance\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path), "--boundaries")
+
+    assert result.exit_code == 0
+    assert "Boundaries" in result.output
+    assert "bank.py:1" in result.output
+    assert "withdraw(balance: float, amount: float) -> float" in result.output
+    assert "[comparison] just below balance" in result.output
+    assert "[comparison] at balance" in result.output
+    assert "[comparison] just above balance" in result.output
+    assert "[numeric] 0" in result.output
+    assert "[numeric] NaN" in result.output
+    assert "[numeric] +Infinity" in result.output
+
+
+def test_scan_without_boundaries_flag_omits_listing(tmp_path: Path) -> None:
+    (tmp_path / "bank.py").write_text(
+        "def withdraw(balance: float, amount: float) -> float:\n"
+        "    if amount <= balance:\n"
+        "        return balance - amount\n",
+        encoding="utf-8",
+    )
+
+    result = invoke("scan", str(tmp_path))
+
+    assert result.exit_code == 0
+    assert "Boundaries" not in result.output
+
+
+def test_scan_boundaries_reports_when_no_candidates_exist(tmp_path: Path) -> None:
+    (tmp_path / "plain.py").write_text("def f(x):\n    return x\n", encoding="utf-8")
+
+    result = invoke("scan", str(tmp_path), "--boundaries")
+
+    assert result.exit_code == 0
+    assert "(no boundary candidates)" in result.output
 
 
 def test_scan_lists_targets_with_flag(tmp_path: Path) -> None:

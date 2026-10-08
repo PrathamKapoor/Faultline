@@ -1,6 +1,11 @@
 """Repository discovery and static AST analysis for EdgeHunter."""
 
-from edgehunter.scanner.ast_parser import analyze_python_file
+from edgehunter.scanner.ast_parser import (
+    SourceFile,
+    analyze_python_file,
+    build_module_analysis,
+    parse_source_file,
+)
 from edgehunter.scanner.models import (
     ClassInfo,
     FunctionInfo,
@@ -11,6 +16,7 @@ from edgehunter.scanner.models import (
     SyntaxIssue,
     TargetKind,
 )
+from edgehunter.scanner.rendering import render_source
 from edgehunter.scanner.repository import (
     PathNotFoundError,
     RepositoryAnalysis,
@@ -21,8 +27,10 @@ from edgehunter.scanner.repository import (
     is_excluded_directory,
     scan_repository,
 )
+from edgehunter.scanner.targets import CallableNode, collect_callable_nodes
 
 __all__ = [
+    "CallableNode",
     "ClassInfo",
     "FunctionInfo",
     "ModuleAnalysis",
@@ -33,11 +41,16 @@ __all__ = [
     "RepositoryAnalysis",
     "ScanError",
     "ScanSummary",
+    "SourceFile",
     "SyntaxIssue",
     "TargetKind",
     "UnsupportedTargetError",
     "analyze_python_file",
     "analyze_repository",
+    "build_module_analysis",
+    "collect_callable_nodes",
     "is_excluded_directory",
+    "parse_source_file",
+    "render_source",
     "scan_repository",
 ]

@@ -4,12 +4,25 @@ Reading and parsing use Python's own source machinery (``tokenize`` for PEP 263
 encoding detection, ``ast`` for parsing). Analyzed code is never imported,
 evaluated, or executed; a syntax failure or unreadable file becomes structured
 data instead of crashing the surrounding repository scan.
+
+The pipeline is split in two stages so a file is read and parsed exactly once
+per scan:
+
+```text
+parse_source_file()   source text  -> ast.Module (or a structured issue)
+        ├── build_module_analysis()    AST -> structural facts (scanner)
+        └── extract_module_semantics() AST -> semantic facts (analysis)
+```
+
+``SourceFile.tree`` is internal pipeline state; it is not part of the public
+scanner models.
 """
 
 from __future__ import annotations
 
 import ast
 import tokenize
+from dataclasses import dataclass
 from pathlib import Path
 
 from edgehunter.scanner.models import (
@@ -20,6 +33,72 @@ from edgehunter.scanner.models import (
 from edgehunter.scanner.targets import extract_module_targets
 
 
+@dataclass(frozen=True, slots=True)
+class SourceFile:
+    """Outcome of the safe read-and-parse stage for one Python source file."""
+
+    path: Path
+    relative_path: Path
+    tree: ast.Module | None
+    syntax_issue: SyntaxIssue | None = None
+    read_issue: ReadIssue | None = None
+
+    @property
+    def is_parsed(self) -> bool:
+        """True when the file was read and parsed without issues."""
+        return self.syntax_issue is None and self.read_issue is None
+
+
+def parse_source_file(path: Path, relative_path: Path) -> SourceFile:
+    """Read and parse one Python source file without importing or executing it.
+
+    Failures are captured, not raised: an unreadable file yields a
+    ``read_issue`` and an unparseable file a ``syntax_issue``.
+    """
+    try:
+        source = _read_source(path)
+    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+        return SourceFile(
+            path=path,
+            relative_path=relative_path,
+            tree=None,
+            read_issue=ReadIssue(message=str(exc)),
+        )
+
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError as exc:
+        return SourceFile(
+            path=path,
+            relative_path=relative_path,
+            tree=None,
+            syntax_issue=SyntaxIssue(line=exc.lineno, column=exc.offset, message=exc.msg),
+        )
+
+    return SourceFile(path=path, relative_path=relative_path, tree=tree)
+
+
+def build_module_analysis(source: SourceFile) -> ModuleAnalysis:
+    """Extract structural facts from an already-parsed file."""
+    if source.tree is None:
+        return ModuleAnalysis(
+            path=source.path,
+            relative_path=source.relative_path,
+            functions=(),
+            classes=(),
+            syntax_issue=source.syntax_issue,
+            read_issue=source.read_issue,
+        )
+
+    functions, classes = extract_module_targets(source.tree)
+    return ModuleAnalysis(
+        path=source.path,
+        relative_path=source.relative_path,
+        functions=functions,
+        classes=classes,
+    )
+
+
 def analyze_python_file(path: Path, relative_path: Path) -> ModuleAnalysis:
     """Analyze one Python source file without importing or executing it.
 
@@ -28,35 +107,7 @@ def analyze_python_file(path: Path, relative_path: Path) -> ModuleAnalysis:
     ``ReadIssue``; a file that cannot be parsed yields a ``SyntaxIssue``. Both
     cases return a ``ModuleAnalysis`` instead of raising.
     """
-    try:
-        source = _read_source(path)
-    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
-        return ModuleAnalysis(
-            path=path,
-            relative_path=relative_path,
-            functions=(),
-            classes=(),
-            read_issue=ReadIssue(message=str(exc)),
-        )
-
-    try:
-        tree = ast.parse(source, filename=str(path))
-    except SyntaxError as exc:
-        return ModuleAnalysis(
-            path=path,
-            relative_path=relative_path,
-            functions=(),
-            classes=(),
-            syntax_issue=SyntaxIssue(line=exc.lineno, column=exc.offset, message=exc.msg),
-        )
-
-    functions, classes = extract_module_targets(tree)
-    return ModuleAnalysis(
-        path=path,
-        relative_path=relative_path,
-        functions=functions,
-        classes=classes,
-    )
+    return build_module_analysis(parse_source_file(path, relative_path))
 
 
 def _read_source(path: Path) -> str:

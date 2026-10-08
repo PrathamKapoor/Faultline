@@ -11,6 +11,7 @@ scope.
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 from enum import Enum
 
 from edgehunter.scanner.models import (
@@ -20,14 +21,25 @@ from edgehunter.scanner.models import (
     ParameterKind,
     TargetKind,
 )
-
-_UNPARSE_FALLBACK = "<unparseable>"
+from edgehunter.scanner.rendering import render_source
 
 
 class _Scope(str, Enum):
     MODULE = "module"
     CLASS = "class"
     FUNCTION = "function"
+
+
+@dataclass(frozen=True, slots=True)
+class CallableNode:
+    """A callable target together with the AST node it was built from.
+
+    The AST node is internal pipeline state: it lets later stages extract facts
+    for the same target without reading or parsing the file again.
+    """
+
+    info: FunctionInfo
+    node: ast.FunctionDef | ast.AsyncFunctionDef
 
 
 def extract_module_targets(
@@ -39,25 +51,41 @@ def extract_module_targets(
     lexical scope. Results are sorted by ``(lineno, qualified_name)`` so the
     ordering is deterministic regardless of traversal details.
     """
-    functions: list[FunctionInfo] = []
+    callables, classes = _collect(tree)
+    return tuple(item.info for item in callables), tuple(classes)
+
+
+def collect_callable_nodes(tree: ast.Module) -> tuple[CallableNode, ...]:
+    """Return every callable target with its AST node, ordered by source line.
+
+    Used by semantic analysis so predicate, comparison, constant, and
+    arithmetic facts are attributed to exactly the targets the structural
+    scanner discovered.
+    """
+    callables, _ = _collect(tree)
+    return tuple(callables)
+
+
+def _collect(tree: ast.Module) -> tuple[list[CallableNode], list[ClassInfo]]:
+    callables: list[CallableNode] = []
     classes: list[ClassInfo] = []
     for statement in tree.body:
-        _visit(statement, (), _Scope.MODULE, functions, classes)
+        _visit(statement, (), _Scope.MODULE, callables, classes)
 
-    functions.sort(key=lambda function: (function.lineno, function.qualified_name))
+    callables.sort(key=lambda item: (item.info.lineno, item.info.qualified_name))
     classes.sort(key=lambda klass: (klass.lineno, klass.qualified_name))
-    return tuple(functions), tuple(classes)
+    return callables, classes
 
 
 def _visit(
     node: ast.AST,
     prefix: tuple[str, ...],
     scope: _Scope,
-    functions: list[FunctionInfo],
+    callables: list[CallableNode],
     classes: list[ClassInfo],
 ) -> None:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        functions.append(_build_function(node, prefix, scope))
+        callables.append(CallableNode(info=_build_function(node, prefix, scope), node=node))
         child_prefix = (*prefix, node.name)
         child_scope = _Scope.FUNCTION
     elif isinstance(node, ast.ClassDef):
@@ -69,7 +97,7 @@ def _visit(
         child_scope = scope
 
     for child in ast.iter_child_nodes(node):
-        _visit(child, child_prefix, child_scope, functions, classes)
+        _visit(child, child_prefix, child_scope, callables, classes)
 
 
 def _build_function(
@@ -98,7 +126,7 @@ def _build_function(
         owner=owner,
         parameters=_extract_parameters(node.args),
         return_annotation=_render_optional(node.returns),
-        decorators=tuple(_render_expression(decorator) for decorator in node.decorator_list),
+        decorators=tuple(render_source(decorator) for decorator in node.decorator_list),
     )
 
 
@@ -108,8 +136,8 @@ def _build_class(node: ast.ClassDef, prefix: tuple[str, ...]) -> ClassInfo:
         qualified_name=".".join((*prefix, node.name)),
         lineno=node.lineno,
         end_lineno=node.end_lineno,
-        bases=tuple(_render_expression(base) for base in node.bases),
-        decorators=tuple(_render_expression(decorator) for decorator in node.decorator_list),
+        bases=tuple(render_source(base) for base in node.bases),
+        decorators=tuple(render_source(decorator) for decorator in node.decorator_list),
     )
 
 
@@ -160,12 +188,4 @@ def _build_parameter(
 def _render_optional(node: ast.expr | None) -> str | None:
     if node is None:
         return None
-    return _render_expression(node)
-
-
-def _render_expression(node: ast.expr) -> str:
-    """Render an expression as source text, falling back instead of crashing."""
-    try:
-        return ast.unparse(node)
-    except Exception:
-        return _UNPARSE_FALLBACK
+    return render_source(node)

@@ -40,8 +40,9 @@ straightforward code.
 
 ## Current status
 
-**Early development. Repository discovery and safe static AST extraction are
-implemented; the counterexample search engine is not.**
+**Early development. Repository discovery, safe static AST extraction, semantic
+fact extraction, and deterministic boundary mining are implemented; the
+counterexample search engine is not.**
 
 What exists today:
 
@@ -49,22 +50,30 @@ What exists today:
   `edgehunter --version`)
 - a `scan` command that discovers Python files (skipping virtual
   environments, caches, and build directories) and parses each one with
-  Python's `ast` module
+  Python's `ast` module — each file is read and parsed exactly once
 - structural extraction of modules, classes, functions, methods (including
   async and nested definitions), parameters with kinds/annotations/defaults,
   decorators, bases, and source line spans
+- semantic extraction of branch predicates (`if`, `while`, `assert`),
+  comparisons (including chained comparisons such as `0 < x <= 10`), literal
+  constants (with `bool` never treated as numeric), and maximal arithmetic
+  expressions with their operators, names, and context
+- deterministic boundary candidates: symbolic regions worth testing, such as
+  "amount just below/at/just above balance", plus generic numeric regions
+  (`0`, `1`, `-1`, and for floats `-0.0`, `NaN`, `±Infinity`)
 - structured reporting of syntax errors and unreadable/undecodable files
-  without aborting the scan, plus an optional `--targets` listing
+  without aborting the scan, plus `--targets` and `--boundaries` detail views
 - a test suite, lint/format configuration, and strict type checking
 
 Safety: analyzed code is never imported or executed. The scanner reads text
-and parses it; nothing else. The repository contains a regression test that
-proves module-level side effects in scanned files do not run.
+and parses it; nothing else. Annotations are matched as source text and never
+resolved. Regression tests prove module-level side effects in scanned files do
+not run and that the package contains no execution primitives.
 
-What does **not** exist yet: branch/control-flow analysis, boundary mining,
-property inference, hypothesis generation, execution, oracles, minimization,
-and reporting. `edgehunter scan` says so in its help text and nowhere claims
-otherwise.
+What does **not** exist yet: risk scoring, property/oracle inference, test
+generation, execution, counterexamples, failure shrinking, and any model-based
+search. Boundary candidates are **not** bugs: they are regions a future
+generator should attack, and nothing here claims a defect exists.
 
 ## Installation
 
@@ -91,39 +100,77 @@ $ edgehunter scan .
 EdgeHunter scan
   target (directory): C:\Projects\edgehunter
 
-  Python files discovered: 13
-  Parsed successfully:     13
+  Python files discovered: 22
+  Parsed successfully:     22
   Syntax issues:           0
   Read issues:             0
 
-  Classes:                 14
-  Functions:               81
-  Methods:                 19
+  Classes:                 36
+  Functions:               175
+  Methods:                 41
   Async targets:           0
-  Callable targets:        100
-  Excluded directories:    9
+  Callable targets:        216
+  Excluded directories:    10
+
+  Predicates:              465
+  Comparisons:             408
+  Arithmetic expressions:  88
+  Boundary candidates:     6
 ```
 
-`scan --targets` lists every callable target with its location and a static
-signature (defaults are rendered as `...`; nothing is executed). Excerpt from
-a small example project:
+`scan --boundaries` lists boundary candidates per target. Real output for a
+small example project (`bank.py` containing `Account.withdraw`,
+`discount`, and `clamp`), excerpted:
 
 ```console
-$ edgehunter scan ./example --targets
+$ edgehunter scan ./example --boundaries
 ...
-Targets
+Boundaries
 
-  app/account.py:2
-    Account.__init__(self, balance: float = ...) -> None
-  app/account.py:5
+  bank.py:5
     Account.withdraw(self, amount: float) -> float
-  app/account.py:9
-    async Account.refresh(self) -> None
-  app/api.py:5
-    list_users(limit: int = ..., *, include_inactive: bool = ...) -> list[Any]
-  app/api.py:10
-    outer.inner() -> int
+
+    amount
+      [comparison] just below self.balance
+      [comparison] at self.balance
+      [comparison] just above self.balance
+      [numeric] 0
+      [numeric] 1
+      [numeric] -1
+      [numeric] -0.0
+      [numeric] NaN
+      [numeric] +Infinity
+      [numeric] -Infinity
+  bank.py:12
+    discount(total: float) -> float
+
+    total
+      [comparison] just below 100
+      [comparison] at 100
+      [comparison] just above 100
+      [numeric] 0
+      ...
+  bank.py:18
+    clamp(value: int) -> int
+
+    value
+      [comparison] just below 0
+      [comparison] just below 10
+      [comparison] at 0
+      [comparison] at 10
+      [comparison] just above 0
+      [comparison] just above 10
+      [numeric] 0
+      [numeric] 1
+      [numeric] -1
 ```
+
+Two things to note in that output. Boundaries are **symbolic**: `amount` is
+"at `self.balance`", never `self.balance - 1`, because the correct step depends
+on a type that this phase deliberately does not resolve. And scanning
+EdgeHunter's own source yields only 6 candidates because almost nothing is
+annotated exactly `int` or `float`; generic numeric candidates require that
+literal annotation.
 
 Exit codes:
 
@@ -160,12 +207,19 @@ src/edgehunter/
 ├── __init__.py        package metadata (version)
 ├── __main__.py        `python -m edgehunter` entry point
 ├── cli.py             Typer application: argument parsing and output only
-└── scanner/
-    ├── __init__.py    public scanner interface
-    ├── repository.py  filesystem discovery + repository-level aggregation
-    ├── models.py      immutable models (targets, parameters, issues)
-    ├── targets.py     AST -> classes/callables (scope-aware, qualified names)
-    └── ast_parser.py  safe source reading + ast.parse + structured issues
+├── scanner/           structural layer: what exists
+│   ├── __init__.py    public interface
+│   ├── repository.py  discovery + RepositoryAnalysis
+│   ├── ast_parser.py  safe read/parse (SourceFile) + structural facts
+│   ├── targets.py     AST -> functions/classes (scope-aware, qualified names)
+│   ├── models.py      immutable structural models
+│   └── rendering.py   shared ast.unparse rendering
+└── analysis/          semantic layer: what the code cares about
+    ├── __init__.py    public interface
+    ├── repository.py  analyze_repository_semantics (structure + semantics)
+    ├── semantics.py   AST -> predicates, comparisons, constants, arithmetic
+    ├── boundaries.py  facts + parameters -> boundary candidates
+    └── models.py      immutable semantic and boundary models
 ```
 
 Pipeline implemented today:
@@ -173,20 +227,27 @@ Pipeline implemented today:
 ```text
 repository path
     ↓
-repository.py        discovery (deterministic, excludes venvs/caches/build dirs)
+scanner/repository.py    discovery (deterministic, excludes venvs/caches/build)
     ↓
-ast_parser.py        tokenize.open → ast.parse → issues on failure
+scanner/ast_parser.py     tokenize.open → ast.parse  (once per file)
     ↓
-targets.py           functions/classes/methods/parameters/annotations/decorators
-    ↓
-models.py            immutable ModuleAnalysis per file
-    ↓
-repository.py        RepositoryAnalysis aggregate → cli.py output
+          ┌──────────────┴───────────────┐
+          ▼                              ▼
+scanner/targets.py                 analysis/semantics.py
+structure: targets, parameters      facts: predicates, comparisons,
+                                     constants, arithmetic
+          └──────────────┬───────────────┘
+                         ▼
+            analysis/boundaries.py    boundary candidates (symbolic)
+                         ↓
+            analysis/repository.py    RepositorySemantics (one read/parse per file)
+                         ↓
+            cli.py                     formatted output
 ```
 
-Future subsystems (analysis, oracle, search, generators, execution, findings,
-retrieval, training) will be added as sibling packages to `scanner`, each with
-typed interfaces, once the features they support actually exist.
+Future subsystems (oracle/property mining, risk scoring, search policy,
+generation, execution, findings) will be added as new sibling packages, each
+with typed interfaces, once the features they support actually exist.
 
 ## Development
 
@@ -204,16 +265,16 @@ mypy                        # strict type checking (configured in pyproject.toml
 - [x] repository discovery
 - [x] safe AST parsing with structured syntax/read issues
 - [x] structural target extraction (functions, classes, methods, parameters)
-- [ ] control-flow / branch analysis
-- [ ] boundary mining
-- [ ] risk scoring
-- [ ] property extraction from assertions, tests, and docstrings
+- [x] predicate and comparison extraction (`if`, `while`, `assert`)
+- [x] simple arithmetic extraction (maximal expressions, operators, context)
+- [x] deterministic boundary mining (symbolic comparison and generic numeric)
+- [ ] risk-based target prioritization
+- [ ] property/oracle extraction (assertions, docstrings, test expectations)
 - [ ] semantic action engine (constrained transformations)
-- [ ] isolated execution engine
-- [ ] oracle evaluation
-- [ ] failure minimization
-- [ ] search policy model
-- [ ] reporting and `reproduce`
+- [ ] test generation
+- [ ] isolated execution
+- [ ] failure shrinking
+- [ ] learned search policy
 
 ## Documentation
 

@@ -23,8 +23,8 @@ in-process:      typer.testing.CliRunner -> the typer.Typer application (used by
 
 ```text
 edgehunter
-├── --version              (eager option on the root callback `_root_callback`)
-└── scan PATH [--targets]  (command `scan`)
+├── --version                        (eager option on the root callback `_root_callback`)
+└── scan PATH [--targets] [--boundaries]   (command `scan`)
 ```
 
 ## 3. Flow: `edgehunter --version`
@@ -40,47 +40,55 @@ app()                                          src/edgehunter/cli.py  — Typer 
 Why: `is_eager=True` makes `--version` run before command resolution, so it
 works even when no command is given.
 
-## 4. Flow: `edgehunter scan PATH [--targets]`
+## 4. Flow: `edgehunter scan PATH [--targets] [--boundaries]`
 
 Where the data comes from: the `PATH` argument typed by the user (a directory
-or a single Python file) and the optional `--targets` flag. Nothing is read
-from the network or environment, and no target code is imported or executed.
+or a single Python file) plus the optional detail flags. Nothing is read from
+the network or environment, and no target code is imported or executed.
 
 ```text
 app()                                          src/edgehunter/cli.py — Typer application entry
- └─ scan(path, targets)                        src/edgehunter/cli.py — command entry; PATH parsed as pathlib.Path
-     ├─ analyze_repository(target)             src/edgehunter/scanner/repository.py — library entry
-     │   ├─ scan_repository(target)            filesystem discovery (see section 5); returns ScanSummary
-     │   │   ├─ _resolve_target(target)        canonicalizes input; raises PathNotFoundError / ScanError
-     │   │   └─ _walk_python_files(resolved)   directory branch, or single-file branch; sorted file list
-     │   └─ analyze_python_file(path, rel)     src/edgehunter/scanner/ast_parser.py — once per file, discovery order
-     │       ├─ _read_source(path)             tokenize.open → PEP 263 encoding rules
-     │       │   └─ OSError/SyntaxError/UnicodeDecodeError → ReadIssue (scan continues)
-     │       ├─ ast.parse(source)              SyntaxError → SyntaxIssue (scan continues)
-     │       └─ extract_module_targets(tree)   src/edgehunter/scanner/targets.py
-     │           ├─ _visit(...)                recursive walk; scope = module/class/function
-     │           ├─ _build_function(...)       parameters, return annotation, decorators, owner, qualified name
-     │           └─ _build_class(...)          bases, decorators, qualified name
-     └─ _print_analysis(analysis, show_targets)
-         ├─ counts                             discovered/parsed/issues, classes/functions/methods/async/callable
-         ├─ _print_issues(analysis)            Syntax issues and Read issues sections when present
-         └─ _print_targets(analysis)           only with --targets; path:line plus static signature per target
+ └─ scan(path, targets, boundaries)            src/edgehunter/cli.py — command entry; PATH parsed as pathlib.Path
+     ├─ analyze_repository_semantics(target)   src/edgehunter/analysis/repository.py — library entry; reads and parses each file once
+     │   ├─ scan_repository(target)            src/edgehunter/scanner/repository.py — discovery (section 5)
+     │   ├─ parse_source_file(path, rel)       src/edgehunter/scanner/ast_parser.py — read + parse ONCE per file
+     │   │   └─ _read_source(path)             tokenize.open → PEP 263 encoding rules
+     │   │       └─ OSError/SyntaxError/UnicodeDecodeError → ReadIssue
+     │   │   └─ ast.parse(source)              SyntaxError → SyntaxIssue
+     │   │       └─ returns SourceFile(tree | None)
+     │   ├─ build_module_analysis(source)      src/edgehunter/scanner/ast_parser.py — structural facts from the same AST
+     │   │   └─ extract_module_targets(tree)   src/edgehunter/scanner/targets.py
+     │   │       ├─ _build_function(...)       parameters, annotations, decorators, owner, qualified name
+     │   │       └─ _build_class(...)          bases, decorators, qualified name
+     │   └─ extract_module_semantics(source, module)
+     │       │                                 src/edgehunter/analysis/semantics.py
+     │       ├─ collect_callable_nodes(tree)   src/edgehunter/scanner/targets.py — same qualified names as structure
+     │       ├─ _target_semantics(item)        per callable: predicates, comparisons, constants, arithmetic
+     │       └─ mine_module_boundaries(module, targets)
+     │                                         src/edgehunter/analysis/boundaries.py — candidates per target
+     └─ _print_analysis(analysis, show_targets=..., show_boundaries=...)
+         ├─ structural counts                 read from analysis.structure (Phase 1 statistics)
+         ├─ semantic counts                   Predicates / Comparisons / Arithmetic expressions / Boundary candidates
+         ├─ _print_issues(structure)           Syntax issues and Read issues sections when present
+         ├─ _print_targets(structure)          only with --targets
+         └─ _print_boundaries(analysis)       only with --boundaries; grouped by parameter
 ```
 
-Where the data ends up: stdout (statistics, issues, optional target list).
-Nothing is written to disk and no state is kept between invocations.
+Where the data ends up: stdout (statistics, issues, optional target and
+boundary listings). Nothing is written to disk and no state is kept between
+invocations.
 
 Error behavior: `ScanError` (missing path, unsupported target) prints
 `error: <message>` to stderr and exits 2 (`EXIT_INVALID_INPUT`). A scan that
 completes but finds unreadable or unparseable files prints the issues and
 exits 1 (`EXIT_SCAN_ISSUES`). A clean scan exits 0. Unexpected exceptions
-propagate unchanged (traceback, non-zero exit) because they indicate bugs.
+propagate unchanged (traceback, non-zero exit) because they indicate bugs; a
+bug inside semantic analysis is never converted into a "source issue".
 
-Why it works this way: discovery stays in `scan_repository()` (Phase 0,
-unchanged), file analysis is one pure function, and repository-level
-aggregation lives in `analyze_repository()`. The CLI only formats results, so
-each layer is testable in isolation and the no-execution boundary stays in one
-place: `analyze_python_file()` reads text and calls `ast.parse` only.
+Why it works this way: one read/parse per file feeds both extractors, so the
+structural and semantic views of a file cannot disagree. Discovery stays in
+`scan_repository()`, file analysis stays in `scanner`, semantics and boundary
+mining live in `analysis`, and the CLI only formats results.
 
 ## 5. Discovery rules (policy, `src/edgehunter/scanner/repository.py`)
 
@@ -99,29 +107,54 @@ place: `analyze_python_file()` reads text and calls `ast.parse` only.
 - Annotations, decorators, and bases are stored as `ast.unparse` output (source text); defaults are recorded only as `has_default`.
 - Issues: at most one `SyntaxIssue` (line/column/message from `SyntaxError`) or `ReadIssue` (exception message) per file; analysis of other files continues.
 
-## 7. Diagram
+## 7. Semantic fact rules (src/edgehunter/analysis/semantics.py)
+
+- Predicates come from `if`, `while`, and `assert` only; `elif` yields its own predicate.
+- Each predicate keeps its containing expression plus every comparison inside it, including inside `and`/`or` operands.
+- Chained comparisons are decomposed into adjacent pairs (`0 < x <= 10` gives `0 < x` and `x <= 10`).
+- Comparisons only originate inside predicates; operators map to a stable `ComparisonOperator` enum.
+- Constants are recorded per literal occurrence with `bool` classified before `int`; `...` is not recorded; signed numerics (`-1`) come from an explicit `UnaryOp`-over-`Constant` helper, never `eval`/`literal_eval`.
+- Arithmetic is recorded as maximal subexpressions only (`(x + y) * 2` is one record with both operators), with a context of return / assignment / annotated assignment / augmented assignment / expression. No folding or simplification.
+- Traversal stops at nested `FunctionDef`, `AsyncFunctionDef`, `ClassDef`, and `Lambda`, so inner callables never donate facts to their parent; module- and class-level conditions belong to no target.
+- A file that failed to read or parse contributes no facts; its `ReadIssue`/`SyntaxIssue` is the only report.
+- Expressions are rendered with `render_source()`; `ExpressionInfo.simple` marks literals, bare names, and plain dotted chains as stable references.
+
+## 8. Boundary mining rules (src/edgehunter/analysis/boundaries.py)
+
+- Candidates are mined only for declared parameters; one side of a comparison must be a bare parameter name.
+- If the parameter is on the right, the operator is inverted (`<`->`>`, `<=`->`>=`, `>`->`<`, `>=`->`<=`, `==`->`==`, `!=`->`!=`); `is`, `is not`, `in`, `not in` are never inverted.
+- Both sides parameters: the syntactic left side wins, so no inverse relational candidate is emitted.
+- References stay symbolic (`amount` at `balance`, never `balance - 1`).
+- A reference must be a literal, bare name, or plain dotted name chain; calls, subscripts, and complex expressions are skipped while the comparison is still recorded.
+- Inequality with an ordered reference gives `JUST_BELOW`/`AT_BOUNDARY`/`JUST_ABOVE`; `==`/`!=` give `AT_BOUNDARY` only; `is`/`in` give nothing; a non-numeric literal gives `AT_BOUNDARY` only.
+- Generic numeric candidates require an annotation of exactly `int` (zero, one, negative one) or `float` (plus negative zero, NaN, +Infinity, -Infinity) on a positional-only, positional-or-keyword, or keyword-only parameter.
+- Deduplicated by `(parameter, kind, reference)` per target, keeping every evidence line; ordered by `(parameter, kind rank, reference)`.
+- No candidate is a bug claim: language is "candidate", "boundary", "interesting region", "static evidence".
+
+## 9. Diagram
 
 ```mermaid
 flowchart TD
-    A["edgehunter scan PATH [--targets]"] --> B["cli.scan"]
-    B --> C["scanner.analyze_repository"]
+    A["edgehunter scan PATH [--targets] [--boundaries]"] --> B["cli.scan"]
+    B --> C["analysis.analyze_repository_semantics"]
     C --> D{"target state"}
     D -->|missing| E["PathNotFoundError → exit 2"]
     D -->|"non-.py file"| F["UnsupportedTargetError → exit 2"]
-    D -->|"directory or .py file"| G["scan_repository → sorted file list"]
-    G --> H["analyze_python_file for each file"]
-    H --> I{"read ok?"}
-    I -->|no| J["ReadIssue"]
-    I -->|yes| K{"parse ok?"}
-    K -->|no| L["SyntaxIssue"]
-    K -->|yes| M["extract_module_targets → ModuleAnalysis"]
-    J --> N["RepositoryAnalysis"]
-    L --> N
-    M --> N
-    N --> O["cli._print_analysis"]
-    O --> P{"issue_count > 0?"}
-    P -->|yes| Q["print issues → exit 1"]
-    P -->|no| R["exit 0"]
+    D -->|"directory or .py file"| G["scan_repository → deterministic file list"]
+    G --> H["parse_source_file (read + parse once)"]
+    H --> I{"read/parse ok?"}
+    I -->|no| J["ReadIssue / SyntaxIssue"]
+    I -->|yes| K["same ast.Module"]
+    K --> L["build_module_analysis (structure)"]
+    K --> M["extract_module_semantics (facts)"]
+    M --> N["mine_module_boundaries (candidates)"]
+    L --> O["RepositorySemantics(structure, modules)"]
+    N --> O
+    J --> O
+    O --> P["cli._print_analysis"]
+    P --> Q{"structure.issue_count > 0?"}
+    Q -->|yes| R["print issues → exit 1"]
+    Q -->|no| S["exit 0"]
 ```
 
 ## Changes in this session (Phase 0: Repository Bootstrap and Engineering Foundation)
@@ -148,3 +181,16 @@ flowchart TD
 | tests | Parser, safety, and aggregation tests; CLI tests updated for new output and exit codes | tests/test_ast_parser.py, tests/test_safety.py, tests/test_repository_analysis.py, tests/test_cli.py | 82d42f3 | D-010..D-014 |
 | docs | Added decisions D-009..D-014 and updated this flow document | decisions.md, flow.md | 82d42f3 | none |
 | docs | Recorded Phase 1 commit hash in `decisions.md`/`flow.md`, rewrote `handoff.md` | decisions.md, flow.md, handoff.md | 603b709 | none |
+
+## Changes in this session (Phase 2 — Static Semantic Analysis + Boundary Mining)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| scanner | Split the pipeline so each file is read/parsed once: added `SourceFile`, `parse_source_file()`, `build_module_analysis()`, `CallableNode`, `collect_callable_nodes()`, and shared `scanner/rendering.py` | src/edgehunter/scanner/ast_parser.py, src/edgehunter/scanner/targets.py, src/edgehunter/scanner/rendering.py, src/edgehunter/scanner/__init__.py | uncommitted | D-015 |
+| analysis | Added the `analysis` package with immutable semantic and boundary models | src/edgehunter/analysis/__init__.py, src/edgehunter/analysis/models.py | uncommitted | D-016, D-017 |
+| analysis | Added predicate/comparison/constant/arithmetic extraction (if, while, assert; chained decomposition; bool kept out of numeric) | src/edgehunter/analysis/semantics.py | uncommitted | D-016, D-020 |
+| analysis | Added deterministic boundary mining with symbolic references, safe-reference rule, dedup, and ordering | src/edgehunter/analysis/boundaries.py | uncommitted | D-017, D-018 |
+| analysis | Added repository orchestration `analyze_repository_semantics()` returning structure plus semantics | src/edgehunter/analysis/repository.py | uncommitted | D-015 |
+| CLI | `scan` prints semantic statistics, gained `--boundaries`; exit codes unchanged | src/edgehunter/cli.py | uncommitted | D-019 |
+| tests | Added semantic extraction, boundary mining, repository aggregation, semantic no-execution, and CLI tests | tests/test_semantics.py, tests/test_boundaries.py, tests/test_semantic_repository.py, tests/test_safety.py, tests/test_cli.py | uncommitted | D-016..D-020 |
+| docs | Added decisions D-015..D-020 and updated this flow document | decisions.md, flow.md | uncommitted | none |
