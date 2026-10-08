@@ -44,9 +44,15 @@ version = { attr = "edgehunter.__version__" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+edgehunter = ["runtime/Dockerfile"]
+
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+markers = [
+    "integration: starts real Docker containers; skipped when Docker is unusable",
+]
 
 [tool.ruff]
 line-length = 100

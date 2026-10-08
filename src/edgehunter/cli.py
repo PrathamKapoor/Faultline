@@ -13,6 +13,13 @@ from typing import Annotated
 import typer
 
 from edgehunter import __version__
+from edgehunter.execution.models import RunReport
+from edgehunter.execution.repository import (
+    ExecutionRefused,
+    RunOptions,
+    execute_target,
+    runtime_context,
+)
 from edgehunter.generation.invocation import ArgumentAssignment, ArgumentPlacement
 from edgehunter.generation.models import MaterializationStatus, SemanticAction
 from edgehunter.oracle.models import (
@@ -25,6 +32,13 @@ from edgehunter.scanner import RepositoryAnalysis, ScanError
 
 EXIT_SCAN_ISSUES = 1
 EXIT_INVALID_INPUT = 2
+EXIT_EXECUTION_REFUSED = 3
+"""`run` uses its own code: nothing executed at all.
+
+Exit code 1 is deliberately never used by `run`, so it cannot be mistaken for
+"a bug was found". This phase performs no oracle evaluation, so there is no such
+outcome to report.
+"""
 
 app = typer.Typer(
     name="edgehunter",
@@ -52,6 +66,207 @@ def _root_callback(
     ] = False,
 ) -> None:
     """Oracle-aware counterexample search engine for Python."""
+
+
+@app.command()
+def run(
+    path: Annotated[
+        Path,
+        typer.Argument(
+            metavar="PATH", help="Directory containing the target, or a single Python file."
+        ),
+    ],
+    target: Annotated[
+        str,
+        typer.Option(
+            "--target",
+            help="Qualified target to execute, e.g. 'divide' or 'app.py::divide'.",
+        ),
+    ],
+    allow_execution: Annotated[
+        bool,
+        typer.Option(
+            "--allow-execution",
+            help="Authorize running untrusted target code inside a Docker container.",
+        ),
+    ] = False,
+    max_cases: Annotated[
+        int,
+        typer.Option("--max-cases", help="Maximum number of eligible candidates to execute."),
+    ] = 5,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", help="Per-invocation wall-clock budget in seconds."),
+    ] = 3.0,
+) -> None:
+    """Execute selected candidate inputs for ONE target inside a Docker sandbox.
+
+    Execution is never implicit: `scan` never runs target code, and this command
+    requires both an explicit ``--target`` and ``--allow-execution``.
+
+    Target code is imported and called only inside a restricted container with no
+    network, a read-only root filesystem, dropped privileges, and bounded
+    time/memory/process limits. If Docker cannot be used, nothing is executed.
+
+    This command reports what happened. It does **not** judge whether any outcome
+    is a bug: an exception is an observation, not a finding.
+    """
+    if not allow_execution:
+        typer.secho(
+            "error: execution requires explicit authorization; pass --allow-execution",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_EXECUTION_REFUSED)
+
+    try:
+        analysis = analyze_repository(path)
+    except ScanError as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_INVALID_INPUT) from exc
+
+    resolved, target_error = _resolve_target(analysis, target)
+    if resolved is None:
+        typer.secho(f"error: {target_error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_INVALID_INPUT)
+
+    try:
+        report = execute_target(
+            analysis,
+            path if path.is_dir() else path.parent,
+            RunOptions(target=resolved, max_cases=max_cases, timeout_seconds=timeout),
+            authorized=True,
+            repository_context=runtime_context(),
+        )
+    except ExecutionRefused as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_EXECUTION_REFUSED) from exc
+
+    _print_execution(report)
+    if not report.executed_count:
+        raise typer.Exit(code=EXIT_EXECUTION_REFUSED)
+
+
+def _resolve_target(analysis: RepositoryScan, spec: str) -> tuple[str | None, str | None]:
+    """Resolve ``name`` or ``path.py::name`` to exactly one known target.
+
+    The same identity rules the execution layer applies are used here, so an
+    ambiguous name is reported as invalid input before Docker is ever consulted
+    instead of silently resolving to whichever module was scanned first.
+    """
+    file_hint, _, qualified = spec.rpartition("::")
+    file_hint = file_hint.strip()
+    qualified = qualified.strip()
+    if not qualified:
+        return None, f"no target name was given in {spec!r}"
+
+    matches = [
+        module.relative_path
+        for module in analysis.semantics.structure.modules
+        for function in module.functions
+        if function.qualified_name == qualified
+    ]
+    if file_hint:
+        wanted = file_hint.replace("\\", "/")
+        matches = [
+            relative
+            for relative in matches
+            if relative.as_posix() == wanted
+            or relative.name == wanted
+            or relative.as_posix().endswith(f"/{wanted}")
+        ]
+
+    if not matches:
+        suffix = f" in {file_hint!r}" if file_hint else ""
+        return None, f"no analyzed target matched {qualified!r}{suffix}"
+    if len(matches) > 1:
+        where = ", ".join(sorted(relative.as_posix() for relative in matches))
+        return None, (
+            f"{qualified!r} is defined in more than one file ({where}); "
+            f"select it with --target 'path::{qualified}'"
+        )
+    # The file hint is carried through so the execution layer resolves the same
+    # identity instead of being handed a bare, ambiguous name.
+    return (f"{file_hint}::{qualified}" if file_hint else qualified), None
+
+
+def _print_execution(report: RunReport) -> None:
+    """Print one structured report; no outcome is described as a defect."""
+    typer.echo("EdgeHunter execution")
+    typer.echo("")
+    typer.echo(f"  Sandbox: {report.sandbox.backend} ({report.sandbox.state.value})")
+    if report.sandbox.detail:
+        typer.echo(f"  {report.sandbox.detail}")
+    typer.echo("  Oracle evaluation: not performed")
+    typer.echo("  Finding: none (this phase only observes)")
+    typer.echo("")
+
+    if not report.sandbox.is_usable:
+        typer.echo("  Execution unavailable: no target code was executed.")
+        typer.echo("")
+        _print_skipped(report)
+        return
+
+    for result in report.results:
+        typer.echo(f"  Target: {result.target.identity}")
+        typer.echo(f"  Action: {result.action_id}")
+        if result.assignments:
+            typer.echo("    Arguments:")
+            for item in result.assignments:
+                typer.echo(
+                    f"      {item.parameter} = {_render_planned(item)}  [{item.origin.value}]"
+                )
+        typer.echo(f"  Outcome: {result.outcome.value.upper()}")
+        observation = result.observation
+        if observation is not None:
+            returned = observation.return_description
+            if returned is not None:
+                typer.echo(f"  Returned:  {returned}")
+            if observation.exception_type is not None:
+                typer.echo(f"  Exception: {observation.exception_type}")
+                if observation.exception_message:
+                    typer.echo(f"  Message:   {observation.exception_message[:200]}")
+            if observation.opaque_return is not None:
+                typer.echo(f"  Returned:  {observation.opaque_return}")
+            if observation.captured_stdout:
+                typer.echo(f"  Stdout:    {_first_line(observation.captured_stdout)}")
+                if observation.stdout_truncated:
+                    typer.echo("             (truncated)")
+        if result.detail:
+            typer.echo(f"  Detail:    {result.detail}")
+        if result.duration_seconds is not None:
+            typer.echo(f"  Duration:  {result.duration_seconds:.3f}s")
+        typer.echo("")
+
+    for refusal in report.skipped:
+        reason = refusal.reason.value if refusal.reason is not None else "unknown"
+        typer.echo(f"  Skipped: {reason}: {refusal.detail}")
+    if report.skipped:
+        typer.echo("")
+
+
+def _print_skipped(report: RunReport) -> None:
+    """Report every refused plan with its reason, even when nothing ran."""
+    if not report.skipped:
+        return
+    typer.echo("  No eligible plan for the selected target:")
+    for refusal in report.skipped:
+        reason = refusal.reason.value if refusal.reason is not None else "unknown"
+        typer.echo(f"    {reason}: {refusal.detail}")
+    typer.echo("")
+
+
+def _render_planned(item: ArgumentAssignment) -> str:
+    """Render a planned argument, showing that an omitted default carries no value."""
+    if item.value_text is not None:
+        return item.value_text
+    if item.placement is ArgumentPlacement.OMITTED:
+        return "(declared default)"
+    return "(unresolved)"
+
+
+def _first_line(text: str) -> str:
+    return text.strip().splitlines()[0][:200] if text.strip() else ""
 
 
 @app.command()
