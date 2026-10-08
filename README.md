@@ -27,7 +27,8 @@ An oracle-aware search over the repository:
 3. **Semantic edge search** — deterministic boundary values plus a search
    policy that proposes constrained actions from a closed vocabulary, such as
    `USE_NAN`, `AT_BOUNDARY`, `JUST_BELOW_BOUNDARY`, or `EMPTY_COLLECTION`,
-   rather than free-form generated tests.
+   rather than free-form generated tests. Strategy *plans* describe how a
+   parameter could be generated without committing to a generator library.
 4. **Isolated execution** — hypotheses are executed, and an oracle decides
    whether a property holds. A model-generated statement is never proof of a
    bug; execution proves findings.
@@ -41,8 +42,9 @@ straightforward code.
 ## Current status
 
 **Early development. Structure, semantics, boundaries, structural risk ranking,
-explicit oracle mining, and a constrained semantic-action engine with input
-materialization are implemented; the counterexample search engine is not.**
+explicit oracle mining, static annotation shapes, safe baseline synthesis,
+invocation planning, and strategy planning are implemented; the counterexample
+search engine is not.**
 
 What exists today:
 
@@ -71,34 +73,67 @@ What exists today:
   strength
 - conservative target resolution for test expectations: unique names resolve,
   ambiguous names are reported as ambiguous, receiver calls stay unresolved
-- a closed semantic-action vocabulary (`SemanticActionKind`): each mined
-  boundary candidate maps onto exactly one action, and collection annotations
-  add `EMPTY_COLLECTION` / `SINGLETON_COLLECTION`
+- conservative static annotation interpretation of modern syntax: `int`,
+  `float`, `bool`, `str`, `list[T]`, `tuple[T, ...]`, `set[T]`, `dict[K, V]`,
+  bare containers, the `typing` spellings, `Optional[...]`, and PEP 604 unions
+  such as `int | None`
+- a closed semantic-action vocabulary (`SemanticActionKind`) where every mined
+  boundary candidate maps onto exactly one action, plus annotation-driven
+  `SET_NONE`, `EMPTY_COLLECTION`, `SINGLETON_COLLECTION`, and
+  `DUPLICATE_ELEMENT_COLLECTION`
 - input materialization that writes values down as Python source text:
   `CONCRETE` for literal references (exact integer neighbours such as
   `99`/`100`/`101`, and adjacent floats via `math.nextafter`), `SYMBOLIC` when
   the value depends on a name, and `UNSUPPORTED` when no value exists
-- single-action candidate cases that never invent a value for another
-  parameter, and instead report which required parameters they leave uncovered
+- safe baseline synthesis: a deterministic filler value for a recognized
+  annotation shape, with its provenance recorded on every value
+- typed invocation plans: exactly one adversarial action per plan, every other
+  argument either a labelled baseline, an observed literal from an existing
+  test, a declared default that is used without being evaluated, or reported as
+  missing
+- framework-independent strategy plans: fixed, ordered descriptor/value tables
+  per parameter, with boundary-derived values labelled by the boundary they came
+  from
 - structured reporting of syntax errors and unreadable files without aborting
   the scan, plus `--targets`, `--boundaries`, `--risk`, `--properties`,
-  `--actions`, and `--candidates`
+  `--actions`, `--candidates`, `--annotations`, `--plans`, and `--strategies`
 
 Safety: analyzed code is never imported or executed, including tests. The
-scanner reads text and parses it; nothing else. Annotations are matched as
-source text and never resolved. Materialized values are source text produced
-for a later phase and are never run here. Regression tests prove module-level
-side effects in scanned files do not run, that mined test expectations are not
-executed, that materialized values are strings rather than constructed objects,
-and that the package contains no execution primitives.
+scanner reads text and parses it; nothing else. Annotations are interpreted
+syntactically and never resolved or evaluated — a forward reference such as
+`"User"` stays unknown rather than being parsed, and an annotation that is a
+call expression is classified unknown and never invoked. Materialized values and
+planned argument values are source text produced for a later phase and are never
+run here. Regression tests prove module-level side effects in scanned files do
+not run, that mined test expectations are not executed, that hostile annotations
+are not invoked, and that the package contains no execution primitives.
 
 What does **not** exist yet: risk calibration, property inference from
 docstrings or metamorphic relations, executable test generation, execution,
 oracle evaluation, counterexamples, failure shrinking, and any model-based
 search. Three things are deliberately *not* claimed here: a boundary candidate
 is not a bug, mined oracle evidence is not a defect — it is an explicit
-expectation a later execution stage can check — and a candidate case is not a
-reproducing input until something actually runs it.
+expectation a later execution stage can check — and neither a candidate case nor
+an invocation plan is a reproducing input until something actually runs it. A
+baseline value is not a validity claim: `0` is the simplest statically
+constructible integer, not a "valid" one.
+
+### Known limitation: annotation interpretation is syntactic
+
+Static annotation interpretation recognizes shapes, not meanings. `List[int]` is
+recognized because of the *syntax* of that subscript, not because EdgeHunter has
+proved that the name `List` refers to `typing.List`. A user alias such as
+`MyInt = int` therefore stays unknown, as does any project-specific or imported
+type. Forward references (`"User"`) are kept as text and never parsed, and
+`Annotated`, `Literal`, `NewType`, `TypeVar`, `Protocol`, `Callable`,
+`Sequence`, `Mapping`, `Iterable`, and `frozenset` are not supported. This is a
+deliberate conservative trade: reporting fewer known types is preferable to
+inventing a value for a type EdgeHunter did not actually recognize.
+
+A second consequence is visible in a real scan: a large majority of parameters in
+an ordinary codebase stay unknown, because most are annotated with project types
+or subscripted generics of them. Unknown means "no baseline, no plan", not
+"broken".
 
 ## Installation
 
@@ -125,43 +160,53 @@ $ edgehunter scan .
 EdgeHunter scan
   target (directory): C:\Projects\edgehunter
 
-  Python files discovered: 41
-  Parsed successfully:     41
+  Python files discovered: 49
+  Parsed successfully:     49
   Syntax issues:           0
   Read issues:             0
 
-  Classes:                 65
-  Functions:               381
-  Methods:                 66
+  Classes:                 80
+  Functions:               522
+  Methods:                 85
   Async targets:           0
-  Callable targets:        447
+  Callable targets:        607
   Excluded directories:    12
 
-  Predicates:              954
-  Comparisons:             857
-  Arithmetic expressions:  150
-  Boundary candidates:     19
+  Predicates:              1314
+  Comparisons:             1183
+  Arithmetic expressions:  182
+  Boundary candidates:     30
 
   Oracle evidence
     Assertions:                   0
     Validation rules:             3
-    Resolved test expectations:   70
-    Unresolved test expectations: 34
+    Resolved test expectations:   83
+    Unresolved test expectations: 38
     Ambiguous test expectations:  5
-    Property candidates:          112
-    Strongly supported targets:   14
-    Risk-scored targets:          447
+    Property candidates:          129
+    Strongly supported targets:   16
+    Risk-scored targets:          607
 
   Semantic actions
-    Actions proposed:          19
-    Concrete values:           12
+    Actions proposed:          187
+    Concrete values:           113
     Symbolic values:           7
-    Unsupported actions:       0
-    Targets with actions:      9
-    Candidate cases:           19
-    Complete cases:            0
-    Partial cases:             12
+    Unsupported actions:       67
+    Targets with actions:      65
+    Candidate cases:           120
+    Complete cases:            17
+    Partial cases:             96
     Symbolic cases:            7
+
+  Planning
+    Parameters recognized:    136
+    Parameters unknown:       622
+    Invocation plans:         120
+    Complete function plans:  38
+    Needs receiver:           1
+    Partial plans:            74
+    Symbolic plans:           7
+    Strategy plans:           62
 ```
 
 `scan --boundaries` lists boundary candidates per target. Real output for a
@@ -370,6 +415,118 @@ are not — filling those in would mean inventing a baseline input, so EdgeHunte
 names them under `missing:` instead. `symbolic` means the value still depends on
 a name.
 
+`--annotations` shows every parameter's rendered annotation beside the shape
+EdgeHunter interpreted it as. This is the cheapest way to understand why a later
+plan has the shape it has:
+
+```console
+$ edgehunter scan ./example --annotations
+...
+Annotations
+
+  Static annotation interpretation is syntactic, not type resolution.
+
+  module_under_test.py:6  process
+    count: int -> INT
+    ratio: float -> FLOAT
+    name: str -> STR
+    tags: list[int] -> LIST[INT]
+    user: User -> UNKNOWN
+    limit: int | None -> OPTIONAL[INT]
+```
+
+`--plans` lifts each candidate case into a complete argument list, labelling
+every value with where it came from:
+
+```console
+$ edgehunter scan ./example --plans
+...
+Invocation plans
+
+  One adversarial action per plan. Filler values record their origin.
+
+  module_under_test.py:6  process(count: int, ratio: float, name: str, tags: list[int], limit: int | None = ...)
+
+    count <- set_zero
+      count = 0  [adversarial_action, positional]
+      ratio = 0.0  [static_type_baseline, positional]
+      name = ""  [static_type_baseline, positional]
+      tags = []  [static_type_baseline, positional]
+      limit = (declared default)  [declared_default, omitted]
+      status: complete_function
+```
+
+One assignment per plan is adversarial; the rest are fillers. That distinction is
+the point of the section: it is what lets a later failure be attributed to the
+`0` in `count` rather than to the `""` in `name`. When an argument cannot be
+filled, the plan says so rather than guessing:
+
+```console
+    count <- set_zero
+      count = 0  [adversarial_action, positional]
+      missing: user
+      status: partial_arguments
+```
+
+`--strategies` prints the deterministic description of how each parameter could
+be generated. It never prints a sampled value:
+
+```console
+$ edgehunter scan ./example --strategies
+...
+Strategy plans
+
+  Deterministic descriptions, not generated samples.
+
+  module_under_test.py:6  process(count: int, ratio: float, name: str, tags: list[int], limit: int | None = ...)
+
+    count: INT  [sampled_from]
+      zero                         0
+      one                          1
+      negative_one                 -1
+      just_below.10                9
+      at_boundary.10               10
+      just_above.10                11
+
+    ratio: FLOAT  [sampled_from]
+      zero                         0.0
+      negative_zero                -0.0
+      nan                          float("nan")
+      positive_infinity            float("inf")
+      negative_infinity            float("-inf")
+      just_below.1.0               0.9999999999999999
+      just_above.1.0               1.0000000000000002
+
+    name: STR  [sampled_from]
+      empty                        ""
+      space                        " "
+      unicode                      "é"
+      nul                          "\x00"
+      long                         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    tags: LIST[INT]  [sampled_from]
+      empty                        []
+      singleton                    [0]
+      repeated_element             [0, 0]
+
+    user: UNKNOWN  [unsupported]
+
+    limit: OPTIONAL[INT]  [sampled_from]
+      zero                         0
+      one                          1
+      negative_one                 -1
+      none                         None
+```
+
+Note `user: UNKNOWN [unsupported]`: an unrecognized type yields no generation
+plan at all. And note `just_below.1.0` — the float neighbours are the genuinely
+adjacent representable values, labelled with the boundary they came from. A
+`list[CustomType]` yields only `empty`: never a fabricated `[None]`.
+
+Note also that this is a *description*, not a sample. Nothing here is generated at
+scan time, and no value is ever passed to a target function, because EdgeHunter
+does not execute anything.
+
 Exit codes:
 
 ```text
@@ -411,6 +568,7 @@ src/edgehunter/
 │   ├── repository.py  discovery + RepositoryAnalysis
 │   ├── ast_parser.py  safe read/parse (SourceFile) + structural facts
 │   ├── targets.py     callables + lexical scope helpers
+│   ├── annotations.py conservative static annotation shapes
 │   ├── models.py      immutable structural models
 │   └── rendering.py   render_source(), source_lineno()
 ├── analysis/          semantic layer: what the code cares about
@@ -426,12 +584,16 @@ src/edgehunter/
 │   ├── production.py  asserts + if/raise validation guards
 │   ├── test_expectations.py  test-file expectations + target resolution
 │   └── repository.py  dedup, resolution, per-target support
-└── generation/        action layer: which inputs are worth trying
+└── generation/        action + planning layers: what to try, and how to call it
     ├── __init__.py    public interface
-    ├── models.py      closed action vocabulary, statuses, candidate cases
+    ├── models.py      closed action vocabulary, statuses, completeness, cases
     ├── materialize.py actions -> concrete / symbolic / unsupported values
-    ├── actions.py     applicability: boundary kinds + annotation categories
-    └── repository.py  per-target aggregation + candidate-case completeness
+    ├── actions.py     applicability: boundary kinds + annotation shapes
+    ├── baselines.py   trustworthy filler values + provenance
+    ├── invocation.py  invocation plans: placement, origins, status
+    ├── strategy.py    framework-independent strategy plans
+    ├── planning.py    repository aggregation + annotation report
+    └── repository.py  per-target aggregation + candidate cases
 ```
 
 Pipeline implemented today:
@@ -467,23 +629,37 @@ test expectations (+ resolution)                                      │
                                          │
                                          ▼
                     generation/actions.py      applicable semantic actions
-                                         │      (boundary kinds + annotations)
+                                         │      (boundary kinds + annotation shapes)
                                          ▼
                     generation/materialize.py concrete / symbolic / unsupported
                                          │
                                          ▼
-                    generation/repository.py  candidate cases + completeness
+                    generation/repository.py  single-action candidate cases
+                                         │
+                                         ▼
+                    generation/baselines.py  safe filler values + provenance
+                                         │
+                                         ▼
+                    generation/invocation.py invocation plans (placement, status)
+                                         │
+                                         ├──────────────┐
+                                         ▼              ▼
+                    generation/strategy.py   strategy plans (descriptions only)
+                    strategy plans
                                          │
                                          ▼
                           pipeline.py     RepositoryScan
-                                           (semantics, oracles, risk, generation)
-                                         ↓
+                                           (semantics, oracles, risk,
+                                            generation, planning, annotations)
+                                         ▼
                           cli.py          formatted output
 ```
 
 Future subsystems (execution, oracle evaluation, findings, search policy) will be
 added as new sibling packages, each with typed interfaces, once the features they
-support actually exist.
+support actually exist. In particular, the strategy plans are deliberately *not*
+tied to a generator library: a later phase may translate them into Hypothesis
+strategies, or into something else, without changing anything above.
 
 ## Development
 
@@ -509,9 +685,13 @@ mypy                        # strict type checking (configured in pyproject.toml
 - [x] basic existing-test expectation mining (`assert call == value`, `pytest.raises`)
 - [x] semantic action engine (constrained transformations)
 - [x] test-input materialization (symbolic boundaries → concrete candidates)
+- [x] static annotation shapes (modern generics, nullable annotations)
+- [x] safe baseline synthesis (no fabricated placeholders)
+- [x] invocation planning (single adversarial action + labelled fillers)
+- [x] strategy planning (framework-independent descriptions)
 - [ ] property-based test generation
 - [ ] isolated execution
-- [ ] oracle evaluation
+- [ ] runtime oracle evaluation
 - [ ] failure shrinking
 - [ ] adaptive neighborhood search
 - [ ] learned search policy
