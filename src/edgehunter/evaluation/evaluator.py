@@ -44,7 +44,10 @@ from edgehunter.evaluation.compare import (
     compare_typed_values,
     status_for,
 )
-from edgehunter.evaluation.exceptions import match_exception
+from edgehunter.evaluation.exceptions import (
+    ExceptionIdentity,
+    match_exception_observed,
+)
 from edgehunter.evaluation.models import (
     ApplicabilityKind,
     AppliedOracle,
@@ -172,7 +175,11 @@ def _evaluate_raises(
             observed_description=observation.return_description or "returned normally",
         )
 
-    verdict = match_exception(expectation.exception, observation.exception_type)
+    verdict = match_exception_observed(
+        expectation.exception,
+        identity_from_observation(observation),
+        expected_binding=expectation.exception_binding,
+    )
     return AppliedOracle(
         oracle=oracle_kind,
         applicability_kind=ApplicabilityKind.EXACT_MATCH,
@@ -180,7 +187,24 @@ def _evaluate_raises(
         reason=verdict.reason,
         evidence=evidence,
         expected_description=expected_text,
-        observed_description=f"raised {observation.exception_type or 'unknown'}",
+        observed_description=f"raised {identity_from_observation(observation).display_name}",
+    )
+
+
+def identity_from_observation(observation: RuntimeObservation) -> ExceptionIdentity:
+    """Build the observed exception identity from what the sandbox reported.
+
+    Missing fields stay ``None``. That is the whole point: an observation that
+    carries no identity evidence must reach the matcher as *unknown*, so it keeps
+    the Phase 6B ``INCONCLUSIVE`` behaviour rather than being read as evidence
+    against a builtin expectation.
+    """
+    return ExceptionIdentity(
+        name=observation.exception_type,
+        module=observation.exception_module,
+        qualname=observation.exception_qualname,
+        is_builtin=observation.exception_builtin,
+        builtin_lineage=observation.exception_builtin_lineage,
     )
 
 

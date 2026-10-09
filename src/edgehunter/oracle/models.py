@@ -116,6 +116,17 @@ class TestExpectationCandidate:
     comparison_operator: ComparisonOperator | None = None
     expected_expression: str | None = None
     exception: str | None = None
+    exception_binding: str | None = None
+    """How the test module itself binds the raised name, when it binds it at all.
+
+    A test module that declares ``class ValueError(Exception)`` and then writes
+    ``pytest.raises(ValueError)`` means its own class, so the bare spelling is not
+    evidence of a standard-library class. This records the conflicting module-scope
+    binding so the evaluator can withhold a verdict instead of assuming. ``None``
+    means the module binds nothing under that name at module scope, which is not
+    proof that the name is unshadowed -- the limitation is recorded in
+    ``_module_bindings``.
+    """
     literal_arguments: tuple[str, ...] = ()
     """Positional arguments that are literals, in call order.
 

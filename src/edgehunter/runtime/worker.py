@@ -31,6 +31,7 @@ cannot run.
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import io
 import json
@@ -67,6 +68,105 @@ MAX_DETAIL_LENGTH = 4096
 # Exactly the built-in scalar types we are willing to describe. ``type(x) is``
 # rather than ``isinstance`` so a subclass with a custom ``__repr__`` is refused.
 _SCALAR_TYPES = (bool, int, float, str)
+
+# Bounds on the exception-identity metadata. Module and qualified names are
+# class attributes, so they are short in practice; the cap exists so a target
+# cannot make the result document grow.
+MAX_IDENTITY_FIELD_LENGTH = 200
+MAX_BUILTIN_LINEAGE = 16
+
+
+def _trusted_builtin_exception_classes() -> frozenset[type]:
+    """The real exception classes defined by :mod:`builtins`, by identity.
+
+    This is the only trusted statement about exception identity in the whole
+    project: a class is a standard-library exception when it **is** one of these
+    objects, not when it merely has the same name. A target may define
+    ``class ValueError(Exception)``; that class is a different object and is
+    correctly reported as non-builtin.
+    """
+    return frozenset(
+        candidate
+        for candidate in vars(builtins).values()
+        if isinstance(candidate, type) and issubclass(candidate, BaseException)
+    )
+
+
+def _class_attribute(cls: type, name: str) -> str | None:
+    """Read a plain string class attribute without invoking target code.
+
+    ``cls.__module__`` normally goes through ``type(cls).__getattribute__``, which
+    for a class with a custom metaclass is target-defined code. ``__module__`` and
+    ``__qualname__`` are ordinary ``str`` entries in the class dictionary, so they
+    are read with ``type.__getattribute__`` directly, which bypasses any
+    metaclass override. Anything that is not a ``str`` is reported as unknown
+    rather than coerced.
+    """
+    try:
+        value = type.__getattribute__(cls, name)
+    except BaseException:  # noqa: BLE001 - a hostile metaclass may raise
+        return None
+    if isinstance(value, str):
+        return value[:MAX_IDENTITY_FIELD_LENGTH]
+    return None
+
+
+def _method_resolution_order(cls: type) -> tuple[type, ...]:
+    """The class's real MRO, or an empty tuple when it cannot be read safely."""
+    try:
+        mro = type.__getattribute__(cls, "__mro__")
+    except BaseException:  # noqa: BLE001 - a hostile metaclass may raise
+        return ()
+    if not isinstance(mro, tuple) or not all(isinstance(entry, type) for entry in mro):
+        return ()
+    return mro
+
+
+def _builtin_lineage(cls: type) -> tuple[str, ...]:
+    """Builtin exception classes in ``cls``'s real MRO, most derived first.
+
+    Walking the MRO and testing each base *by identity* against
+    :func:`_trusted_builtin_exception_classes` is what makes the result a fact
+    about Python's inheritance rather than a guess from names. A class deriving
+    from the real ``ValueError`` lists it; ``class MyValueError(Exception)`` does
+    not, and neither does ``class ValueError(Exception)`` which merely shares a
+    name.
+    """
+    trusted = _trusted_builtin_exception_classes()
+    names: list[str] = []
+    for base in _method_resolution_order(cls):
+        if base in trusted:
+            name = _class_attribute(base, "__name__")
+            if name is not None and name not in names:
+                names.append(name)
+        if len(names) >= MAX_BUILTIN_LINEAGE:
+            break
+    return tuple(names)
+
+
+def _exception_identity(exc: BaseException) -> dict[str, Any]:
+    """Describe the class of a raised exception using only safe metadata.
+
+    Nothing here calls ``repr``, ``str``, or any method on the exception or its
+    class, and nothing is serialized: only the class dictionary's own string
+    entries and its real MRO are read. Every field is omitted when it cannot be
+    established, so "unknown" stays distinguishable from "recorded".
+    """
+    cls = type(exc)
+    module = _class_attribute(cls, "__module__")
+    qualname = _class_attribute(cls, "__qualname__")
+    lineage = _builtin_lineage(cls)
+    is_builtin = cls in _trusted_builtin_exception_classes()
+
+    identity: dict[str, Any] = {}
+    if module is not None:
+        identity["exception_module"] = module
+    if qualname is not None:
+        identity["exception_qualname"] = qualname
+    identity["exception_builtin"] = is_builtin
+    if lineage:
+        identity["exception_builtin_lineage"] = list(lineage)
+    return identity
 
 
 class ImportFailure(Exception):
@@ -194,6 +294,7 @@ def _run_once(python_stdout: _BoundedStream, python_stderr: _BoundedStream) -> d
                         "raised",
                         exception_type=type(exc).__name__,
                         exception_message=_clip(str(exc)),
+                        **_exception_identity(exc),
                     )
                 )
                 return result
@@ -360,6 +461,10 @@ def _outcome(
     detail: str = "",
     exception_type: str | None = None,
     exception_message: str | None = None,
+    exception_module: str | None = None,
+    exception_qualname: str | None = None,
+    exception_builtin: bool | None = None,
+    exception_builtin_lineage: list[str] | None = None,
     return_value: dict[str, Any] | None = None,
     opaque_return: str | None = None,
 ) -> dict[str, Any]:
@@ -369,7 +474,21 @@ def _outcome(
     if exception_type is not None:
         document["exception_type"] = exception_type[:MAX_OPAQUE_TYPE_LENGTH]
     if exception_message is not None:
-        document["exception_message"] = exception_message
+        # Clipped here as well as at the call site, so the bound is a property of
+        # the document builder rather than of whoever remembered to call _clip.
+        document["exception_message"] = _clip(exception_message)
+    # Phase 7A exception identity. Every field is optional and purely additive:
+    # a document without them is still a valid, decodable result.
+    if exception_module is not None:
+        document["exception_module"] = exception_module[:MAX_IDENTITY_FIELD_LENGTH]
+    if exception_qualname is not None:
+        document["exception_qualname"] = exception_qualname[:MAX_IDENTITY_FIELD_LENGTH]
+    if exception_builtin is not None:
+        document["exception_builtin"] = exception_builtin
+    if exception_builtin_lineage is not None:
+        document["exception_builtin_lineage"] = [
+            name[:MAX_IDENTITY_FIELD_LENGTH] for name in exception_builtin_lineage
+        ][:MAX_BUILTIN_LINEAGE]
     if return_value is not None:
         document["return_value"] = return_value
     if opaque_return is not None:

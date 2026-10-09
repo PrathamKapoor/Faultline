@@ -80,8 +80,14 @@ What exists today:
   such as `int | None`
 - a closed semantic-action vocabulary (`SemanticActionKind`) where every mined
   boundary candidate maps onto exactly one action, plus annotation-driven
-  `SET_NONE`, `EMPTY_COLLECTION`, `SINGLETON_COLLECTION`, and
-  `DUPLICATE_ELEMENT_COLLECTION`
+  `SET_NONE`, the three collection shapes, the two boolean values
+  (`SET_FALSE`, `SET_TRUE`), and the five string edge shapes
+  (`EMPTY_STRING`, `WHITESPACE_STRING`, `UNICODE_STRING`,
+  `NULL_CHARACTER_STRING`, `LONG_STRING`)
+- deterministic, fixed string values — `""`, `" "`, `"é漢🙂"`, `"\x00"`, and
+  `"a" * 1024` — where the long-string length is a module constant that neither
+  the target nor the CLI can influence, and booleans that are always written as
+  the Python literals `False`/`True` rather than `0`/`1`
 - input materialization that writes values down as Python source text:
   `CONCRETE` for literal references (exact integer neighbours such as
   `99`/`100`/`101`, and adjacent floats via `math.nextafter`), `SYMBOLIC` when
@@ -122,8 +128,14 @@ What exists today:
   `True == 1` still holds), supports `==`, `!=`, `<`, `<=`, `>`, `>=`, and
   identity against `None` only, and reports `UNSUPPORTED` rather than `MISMATCH`
   whenever Python itself refuses a comparison
-- expected-exception verification including the real builtin exception hierarchy,
-  with custom exception identity reported `INCONCLUSIVE` rather than guessed
+- expected-exception verification that uses the real builtin exception hierarchy and
+  the observed class's actual inheritance, so a genuine `class MyValueError(
+  ValueError)` satisfies `pytest.raises(ValueError)` the way Python does — while
+  custom exception identity stays `INCONCLUSIVE` rather than guessed
+- observed exception identity recorded by the sandbox itself: the class's module,
+  its qualified name, whether it *is* a real `builtins` exception class, and which
+  `builtins` exceptions appear in its real MRO, read without invoking any
+  target-defined code
 - source-snapshot verification: the SHA-256 of the analyzed bytes is compared with
   the bytes that were staged and executed, and an unverifiable snapshot produces no
   verdict
@@ -230,6 +242,30 @@ process, so a determined target could in principle interfere with process state.
 The isolation model reduces this risk; it does not eliminate it. Strengthening
 worker/target integrity is a separate future security task and is not addressed
 here.
+
+### Known limitation: observed exception identity is real, not absolute
+
+When a target raises, the worker records more than a bare class name: the class's
+module, its qualified name, whether it **is** one of the real `builtins` exception
+classes, and which `builtins` exception classes appear in its real MRO. That is
+read from the class object itself inside the container, using
+`type.__getattribute__` so a custom metaclass never runs on the observation path.
+
+This is enough to tell the real `ValueError` apart from a target's own
+`class ValueError(Exception)`, and to let `class MyValueError(ValueError)` satisfy
+`pytest.raises(ValueError)` exactly as Python's own semantics do. It is **not**
+enough to resolve a custom expected class: `pytest.raises(app.errors.
+InvalidInput)` stays `INCONCLUSIVE` even when the observed qualified name is
+character-for-character the same, because the test module's own binding of that
+name is unknown and resolving it would require importing target code on the host.
+
+So the limitation from Phase 6B still stands, unchanged in substance: custom
+exception identity is not resolved, only *observed*. Richer observation narrows
+what is unknown; it never manufactures a verdict.
+
+A target is not prevented from lying about its own class's `__module__` or
+`__qualname__`, and neither is it prevented from influencing the worker process —
+that is the worker-trust limitation above, and this change does not weaken it.
 
 ## Installation
 
@@ -889,12 +925,28 @@ never on duration, execution id, container id, or temporary path. `NaN` and
   is not something the evaluator can observe, and `==` is not a substitute.
 - **Custom exception identity is not guessed.** A bare `PaymentError` in a test and
   a bare `PaymentError` at runtime are reported `INCONCLUSIVE`, because two modules
-  may define the same class name.
+  may define the same class name. This still holds when the runtime supplies a
+  fully qualified name that happens to match the expectation's text: the
+  expectation's class is resolved by the test module's own imports, which are not
+  resolved.
+- **A bare builtin name is only evidence when the test module does not shadow it.**
+  A test file that declares `class ValueError(Exception)` and then writes
+  `pytest.raises(ValueError)` means its own class, so that expectation is
+  `INCONCLUSIVE` rather than a match. Only module-scope bindings are detected; a
+  function-local import of the same name beside a `pytest.raises` is a documented
+  gap, not a resolved case.
+- **A name difference is never a mismatch by itself.** A `MISMATCH` for an exception
+  requires a real inheritance fact — either both classes are standard-library
+  exceptions, or the sandbox walked the raised class's MRO and the expected builtin
+  is provably absent from it.
 - **Custom return objects are not compared.** When the protocol cannot represent a
   return value, the result is `UNSUPPORTED`, never `MISMATCH`.
 - **An unverified source snapshot yields no verdict.** Oracle evidence describes a
   specific revision; if the executed bytes cannot be proven to be those bytes, the
   status is `INCONCLUSIVE`.
+- **No counterexample is minimised.** There is no shrinker, no adaptive search, and
+  no learned policy. An exact expectation applies to one exact input: `assert
+  f(100) == 200` says nothing about `f(10)`, however much smaller `10` is.
 
 #### What this does not claim
 
@@ -904,6 +956,10 @@ assertions into universal contracts, support arbitrary test frameworks, or
 eliminate all false positives. A mismatch is evidence that one explicit,
 applicable expectation and one observation disagree — nothing more. Bug severity
 and impact assessment are not performed in this phase.
+
+It also does not claim support for arbitrary type constructors, complex fixtures,
+custom object serialization, general Python import resolution, all possible Python
+exception relationships, or automatic bug detection from every exception.
 
 ## Architecture
 
@@ -1068,6 +1124,8 @@ mypy                        # strict type checking (configured in pyproject.toml
 - [x] isolated execution (hardened Docker backend, explicit opt-in, no host fallback)
 - [x] runtime oracle evaluation (exact applicability, safe comparison, expected
       exceptions, optional bounded reproduction, conservative findings)
+- [x] action coverage repair (`bool` and `str` parameters produce plans)
+- [x] qualified exception identity (module, qualname, builtin lineage from the sandbox)
 - [ ] property-based test generation
 - [ ] counterexample search
 - [ ] failure shrinking

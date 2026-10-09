@@ -8,7 +8,7 @@ this module so it can be tested without going through the command line.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Final
 
 import typer
 
@@ -879,7 +879,7 @@ def _print_candidates(analysis: RepositoryScan) -> None:
 def _render_value(action: SemanticAction) -> str:
     """Render a materialized value; a symbolic value is shown in angle brackets."""
     if action.value_text is not None:
-        return action.value_text
+        return _display_text(action.value_text)
     if action.symbolic_text is not None:
         return f"<{action.symbolic_text}>"
     return "(none)"
@@ -964,7 +964,7 @@ def _print_strategies(analysis: RepositoryScan) -> None:
                 f"  [{parameter.kind.value}]"
             )
             for value in parameter.values:
-                typer.echo(f"      {value.descriptor:<28} {value.text}")
+                typer.echo(f"      {value.descriptor:<28} {_display_text(value.text)}")
             if parameter.depends_on:
                 typer.echo(f"      depends on: {', '.join(parameter.depends_on)}")
             typer.echo("")
@@ -973,10 +973,64 @@ def _print_strategies(analysis: RepositoryScan) -> None:
 def _render_assignment(item: ArgumentAssignment) -> str:
     """Render a planned argument value, or how it is left unsupplied."""
     if item.value_text is not None:
-        return item.value_text
+        return _display_text(item.value_text)
     if item.placement is ArgumentPlacement.OMITTED:
         return "(declared default)"
     return "(unresolved)"
+
+
+# Longest value text printed verbatim before the display is compacted. The value
+# itself is never shortened -- the codec, the plans, and the execution layer all
+# keep the exact literal -- this only bounds what a terminal has to render.
+_DISPLAY_TEXT_LIMIT: Final[int] = 80
+
+# Only the three control characters that would otherwise break a single line.
+# Quotes and backslashes are deliberately *not* escaped: display text is terminal
+# output, not source to be re-parsed, so escaping them would misreport values such
+# as `float("nan")` and a stored `"\x00"` literal that already reads correctly.
+_DISPLAY_SHORT_ESCAPES: Final[dict[str, str]] = {
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+
+
+def _display_text(text: str) -> str:
+    """Render a stored value as bounded, ASCII-safe, deterministic terminal text.
+
+    Two separate problems are solved here, and neither touches the stored value.
+
+    * **Length.** A bounded long string is 1,024 characters, which would be
+      printed in full by every one of the actions, candidates, plans, and
+      strategies sections. The displayed form is compacted to a prefix plus its
+      true length so a reader can tell what it is, while ``value_text`` keeps
+      all 1,024 characters for the codec.
+    * **Encodability.** The output stream may not be able to encode every
+      character (a legacy console encoding cannot represent a NUL, an emoji, or
+      a CJK character). Every character outside printable ASCII is therefore
+      shown as an explicit escape. A real NUL byte is never written to a
+      terminal, and the rendering does not depend on the host's console
+      encoding, so the same scan prints the same bytes everywhere.
+    """
+    body = "".join(_display_char(character) for character in text)
+    if len(body) <= _DISPLAY_TEXT_LIMIT:
+        return body
+    return f"{body[:_DISPLAY_TEXT_LIMIT]}... ({len(text)} chars)"
+
+
+def _display_char(character: str) -> str:
+    """Escape one character for display unless it is printable ASCII."""
+    short = _DISPLAY_SHORT_ESCAPES.get(character)
+    if short is not None:
+        return short
+    code_point = ord(character)
+    if 0x20 <= code_point < 0x7F:
+        return character
+    if code_point < 0x100:
+        return f"\\x{code_point:02x}"
+    if code_point < 0x10000:
+        return f"\\u{code_point:04x}"
+    return f"\\U{code_point:08x}"
 
 
 def _format_location(relative_path: Path, line: int | None, column: int | None) -> str:

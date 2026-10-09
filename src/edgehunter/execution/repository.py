@@ -486,6 +486,10 @@ _RESULT_KEYS: Final[frozenset[str]] = frozenset(
         "detail",
         "exception_type",
         "exception_message",
+        "exception_module",
+        "exception_qualname",
+        "exception_builtin",
+        "exception_builtin_lineage",
         "return_value",
         "opaque_return",
         "duration_seconds",
@@ -637,6 +641,10 @@ def _observation_from(document: dict[str, Any]) -> RuntimeObservation:
         opaque_return=_optional_str(document.get("opaque_return")),
         exception_type=_optional_str(document.get("exception_type")),
         exception_message=_optional_str(document.get("exception_message")),
+        exception_module=_optional_str(document.get("exception_module")),
+        exception_qualname=_optional_str(document.get("exception_qualname")),
+        exception_builtin=_optional_bool(document.get("exception_builtin")),
+        exception_builtin_lineage=_optional_str_tuple(document.get("exception_builtin_lineage")),
         captured_stdout=_optional_str(document.get("captured_stdout")) or "",
         captured_stderr=_optional_str(document.get("captured_stderr")) or "",
         stdout_truncated=bool(document.get("stdout_truncated", False)),
@@ -646,6 +654,34 @@ def _observation_from(document: dict[str, Any]) -> RuntimeObservation:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _optional_bool(value: object) -> bool | None:
+    """A boolean field, or ``None`` when absent or of the wrong type.
+
+    Malformed metadata must never crash the host, and it must never be coerced:
+    a value that is not literally ``True`` or ``False`` is treated as unknown, not
+    as ``False``, so a hostile document cannot manufacture a verdict.
+    """
+    if value is True:
+        return True
+    if value is False:
+        return False
+    return None
+
+
+def _optional_str_tuple(value: object) -> tuple[str, ...] | None:
+    """A list of names, or ``None`` when absent or not a list of strings.
+
+    A lineage that is partly malformed is dropped entirely rather than repaired,
+    because a partially-trusted inheritance chain would be worse than none: it
+    could make a non-subclass look like a subclass.
+    """
+    if not isinstance(value, list):
+        return None
+    if not all(isinstance(entry, str) for entry in value):
+        return None
+    return tuple(value)
 
 
 def _ready_sandbox() -> SandboxStatus:

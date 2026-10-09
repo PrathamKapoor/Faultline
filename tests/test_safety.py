@@ -287,14 +287,16 @@ def test_unrecognized_annotations_never_trigger_construction(tmp_path: Path) -> 
     analysis = analyze_repository_full(tmp_path)
 
     assert not marker.exists()
-    # ``dict[str, int]`` is now recognized, so the payload contributes an empty
-    # and a singleton dict. No ``Widget`` is ever constructed, and the unknown
-    # ``widget`` parameter simply stays missing.
-    assert analysis.generation.action_count == 2
-    assert analysis.generation.case_count == 2
+    # ``dict[str, int]`` is recognized, so the payload contributes an empty and a
+    # singleton dict. Phase 7A added the two boolean actions, so ``flag``
+    # contributes ``False`` and ``True``. No ``Widget`` is ever constructed, and
+    # the unknown ``widget`` parameter simply stays missing on every case.
+    assert analysis.generation.action_count == 4
+    assert analysis.generation.case_count == 4
     for case in analysis.generation.cases:
-        assert case.parameter == "payload"
-        assert case.missing_parameters == ("widget",)
+        assert case.parameter in {"payload", "flag"}
+        assert "widget" in case.missing_parameters
+        assert "Widget" not in (case.action.value_text or "")
 
 
 def _call_name(func: ast.expr) -> str | None:

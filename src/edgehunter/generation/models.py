@@ -32,10 +32,16 @@ class SemanticActionKind(str, Enum):
 
     Ten members correspond one-to-one with the numeric and relational
     :class:`~edgehunter.analysis.models.BoundaryKind` values that boundary
-    mining can produce. The other four are annotation-driven and have no
-    boundary counterpart: ``SET_NONE`` (the annotation permits ``None``) and the
-    three collection shapes ``EMPTY_COLLECTION``, ``SINGLETON_COLLECTION``, and
-    ``DUPLICATE_ELEMENT_COLLECTION``.
+    mining can produce. The remaining eleven are annotation-driven and have no
+    boundary counterpart: ``SET_NONE`` (the annotation permits ``None``), the
+    three collection shapes, the two boolean values, and the five string edge
+    shapes.
+
+    The boolean and string members exist because a recognized ``bool`` or ``str``
+    parameter was previously unreachable: no boundary candidate applies to a
+    non-numeric annotation, so such a parameter received no action, no candidate
+    case, and therefore no invocation plan. They are annotation-driven for
+    exactly the same reason the collection members are.
     """
 
     JUST_BELOW_BOUNDARY = "just_below_boundary"
@@ -52,6 +58,13 @@ class SemanticActionKind(str, Enum):
     EMPTY_COLLECTION = "empty_collection"
     SINGLETON_COLLECTION = "singleton_collection"
     DUPLICATE_ELEMENT_COLLECTION = "duplicate_element_collection"
+    SET_FALSE = "set_false"
+    SET_TRUE = "set_true"
+    EMPTY_STRING = "empty_string"
+    WHITESPACE_STRING = "whitespace_string"
+    UNICODE_STRING = "unicode_string"
+    NULL_CHARACTER_STRING = "null_character_string"
+    LONG_STRING = "long_string"
 
 
 ACTION_KIND_ORDER: Final[dict[SemanticActionKind, int]] = {
@@ -69,6 +82,13 @@ ACTION_KIND_ORDER: Final[dict[SemanticActionKind, int]] = {
     SemanticActionKind.EMPTY_COLLECTION: 11,
     SemanticActionKind.SINGLETON_COLLECTION: 12,
     SemanticActionKind.DUPLICATE_ELEMENT_COLLECTION: 13,
+    SemanticActionKind.SET_FALSE: 14,
+    SemanticActionKind.SET_TRUE: 15,
+    SemanticActionKind.EMPTY_STRING: 16,
+    SemanticActionKind.WHITESPACE_STRING: 17,
+    SemanticActionKind.UNICODE_STRING: 18,
+    SemanticActionKind.NULL_CHARACTER_STRING: 19,
+    SemanticActionKind.LONG_STRING: 20,
 }
 
 

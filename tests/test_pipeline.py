@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import edgehunter.scanner.ast_parser as ast_parser_module
-from edgehunter.generation import SemanticActionKind
+from edgehunter.generation import AssignmentOrigin, SemanticActionKind
 from edgehunter.oracle import OracleSupport, PropertyKind, TargetResolution
 from edgehunter.pipeline import analyze_repository
 from edgehunter.scanner.ast_parser import SourceText
@@ -300,7 +300,20 @@ def test_planning_composes_over_the_candidate_layer(tmp_path: Path) -> None:
     # One plan per candidate case: planning adds no cases of its own.
     assert scan.planning.plan_count == scan.generation.case_count
     assert scan.planning.complete_plan_count == scan.generation.case_count
-    assert all(plan.primary_action.parameter == "x" for plan in scan.planning.plans)
+
+    # Phase 7A: a recognized ``str`` parameter is reachable, so ``name`` now has
+    # plans of its own. Before that change the assertion here was
+    # ``all(... == "x")``, which held only because ``str`` produced no action at
+    # all. The structural property the test is really about is that each plan
+    # carries exactly one primary action and never a combination of them, so
+    # that is what is asserted now.
+    assert {plan.primary_action.parameter for plan in scan.planning.plans} == {"x", "name"}
+    for plan in scan.planning.plans:
+        adversarial = [
+            item for item in plan.assignments if item.origin is AssignmentOrigin.ADVERSARIAL_ACTION
+        ]
+        assert len(adversarial) == 1
+        assert adversarial[0].parameter == plan.primary_action.parameter
 
 
 def test_syntax_issue_yields_no_plans(tmp_path: Path) -> None:

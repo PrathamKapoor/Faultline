@@ -46,6 +46,98 @@ _GENERIC_FLOAT_VALUES: Final[dict[BoundaryKind, tuple[str, LiteralKind]]] = {
     BoundaryKind.NEGATIVE_INFINITY: ('float("-inf")', LiteralKind.FLOAT),
 }
 
+# The whole boolean domain. `bool` has exactly two values, so the action
+# vocabulary covers it completely rather than sampling it. Both are written as
+# Python boolean literals: they are never `0` and `1`, because `type(True) is
+# bool` and the typed protocol preserves that distinction (a `BOOLEAN` value
+# cannot be silently read back as an `INTEGER`).
+_BOOL_VALUES: Final[dict[SemanticActionKind, str]] = {
+    SemanticActionKind.SET_FALSE: "False",
+    SemanticActionKind.SET_TRUE: "True",
+}
+
+# The deterministic string edge set. These are input *shapes* a string parameter
+# is interesting at, not attack payloads: nothing here is a path traversal, an
+# injection string, or a format-string exploit. There is no randomness and no
+# generated code point; every value is a fixed constant chosen because it sits at
+# a boundary of ordinary string handling.
+#
+# `LONG_STRING_LENGTH` is a hard bound. Neither the target nor the CLI can
+# influence it, so a run cannot be made to allocate or print an arbitrary amount.
+LONG_STRING_LENGTH: Final[int] = 1024
+UNICODE_STRING_SAMPLE: Final[str] = "é漢\U0001f642"
+NULL_CHARACTER: Final[str] = "\x00"
+
+_STRING_VALUES: Final[dict[SemanticActionKind, str]] = {
+    SemanticActionKind.EMPTY_STRING: "",
+    SemanticActionKind.WHITESPACE_STRING: " ",
+    SemanticActionKind.UNICODE_STRING: UNICODE_STRING_SAMPLE,
+    SemanticActionKind.NULL_CHARACTER_STRING: NULL_CHARACTER,
+    SemanticActionKind.LONG_STRING: "a" * LONG_STRING_LENGTH,
+}
+
+_BOOL_ACTIONS: Final[frozenset[SemanticActionKind]] = frozenset(_BOOL_VALUES)
+_STRING_ACTIONS: Final[frozenset[SemanticActionKind]] = frozenset(_STRING_VALUES)
+
+# The short escape spellings Python's own literal syntax already defines. Anything
+# else non-printable is escaped as ``\xNN`` below.
+_STRING_SHORT_ESCAPES: Final[dict[str, str]] = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+
+
+def render_string_literal(value: str) -> str:
+    """Render ``value`` as EdgeHunter's canonical double-quoted Python literal.
+
+    One rendering function serves every layer that has to write a string value
+    down — the string actions, the strategy examples, and the ``str`` baseline in
+    :mod:`edgehunter.generation.baselines` — so the same input is always spelled
+    the same way. That is what makes the strategy layer's by-text deduplication
+    correct: a primitive example and the action-derived value for the same string
+    have to be byte-identical to collapse into one entry, and hand-written
+    spellings (``""`` versus ``repr``'s ``''``) silently list the same input twice.
+
+    Double quotes are used because that is the spelling the ``str`` baseline and
+    the existing strategy table already used. A control character is always
+    escaped, so a NUL travels as the six characters ``\\x00`` in the source text
+    and only becomes a real NUL when the execution codec recognizes the literal.
+    That keeps the text valid Python, keeps it round-trippable, and keeps a NUL
+    byte out of any log or terminal that prints the source text.
+
+    Printable non-ASCII is left literal, so the recorded value reads as the
+    documented constant. Turning a character into a terminal-safe escape is the
+    CLI's decision, not this layer's, so display concerns stay out of the value.
+    """
+    body = "".join(_escape_string_char(character) for character in value)
+    return f'"{body}"'
+
+
+def _escape_string_char(character: str) -> str:
+    """Escape one character unless it is printable and safely encodable.
+
+    Printable non-ASCII is kept literally, so the recorded value reads as the
+    documented constant (``"é漢🙂"``) and the CLI stays the single place that
+    decides how a character is displayed. Only characters that cannot be written
+    as themselves -- controls, and any lone surrogate, which has no encoding of
+    its own -- are escaped.
+    """
+    short = _STRING_SHORT_ESCAPES.get(character)
+    if short is not None:
+        return short
+    code_point = ord(character)
+    if 0xD800 <= code_point <= 0xDFFF:
+        return f"\\u{code_point:04x}"
+    if character.isprintable():
+        return character
+    if code_point < 0x100:
+        return f"\\x{code_point:02x}"
+    return f"\\u{code_point:04x}"
+
+
 _CONSTANT_TO_LITERAL_KIND: Final[dict[ConstantKind, LiteralKind]] = {
     ConstantKind.INTEGER: LiteralKind.INTEGER,
     ConstantKind.FLOAT: LiteralKind.FLOAT,
@@ -107,6 +199,70 @@ def materialize_generic_numeric(
         value_text=value_text,
         literal_kind=literal_kind,
     )
+
+
+def materialize_bool(action: SemanticActionKind, shape: StaticAnnotation) -> Materialization:
+    """Materialize ``SET_FALSE`` / ``SET_TRUE`` for a recognized ``BOOL`` shape.
+
+    A non-boolean shape is refused rather than coerced. Passing ``True`` to an
+    ``int`` parameter would be legal Python and a silent type change, so the
+    boolean actions are only ever offered where the annotation says ``bool``.
+    """
+    if shape.kind is not AnnotationKind.BOOL:
+        return Materialization(
+            status=MaterializationStatus.UNSUPPORTED,
+            reason=f"{shape.description} is not a bool, so a boolean value would change its type",
+        )
+    if action not in _BOOL_ACTIONS:
+        return Materialization(
+            status=MaterializationStatus.UNSUPPORTED,
+            reason=f"{action.value} is not a boolean action",
+        )
+    return Materialization(
+        status=MaterializationStatus.CONCRETE,
+        reason=(
+            f"{shape.description}: the whole boolean domain, written as a Python bool "
+            "literal rather than as an integer"
+        ),
+        value_text=_BOOL_VALUES[action],
+        literal_kind=LiteralKind.BOOLEAN,
+    )
+
+
+def materialize_string(action: SemanticActionKind, shape: StaticAnnotation) -> Materialization:
+    """Materialize one deterministic string edge value for a ``STR`` shape.
+
+    The value is written with :func:`render_string_literal`, so a NUL character
+    travels as the six-character escape ``"\\x00"`` in the *source text* and only
+    becomes a real NUL when the Phase 6A codec recognizes that literal. The
+    recorded value is never truncated: it is exactly what the target receives.
+
+    A non-string shape is refused rather than coerced. Passing ``""`` to an
+    ``int`` parameter would be a silent type change, so the string actions are
+    only ever offered where the annotation says ``str``.
+    """
+    if shape.kind is not AnnotationKind.STR:
+        return Materialization(
+            status=MaterializationStatus.UNSUPPORTED,
+            reason=f"{shape.description} is not a str, so a string value would change its type",
+        )
+    value = _STRING_VALUES.get(action)
+    if value is None:
+        return Materialization(
+            status=MaterializationStatus.UNSUPPORTED,
+            reason=f"{action.value} is not a string action",
+        )
+    return Materialization(
+        status=MaterializationStatus.CONCRETE,
+        reason=f"{shape.description}: deterministic {action.value.replace('_', ' ')} edge value",
+        value_text=render_string_literal(value),
+        literal_kind=LiteralKind.TEXT,
+    )
+
+
+def is_string_action(action: SemanticActionKind) -> bool:
+    """True for the five string-shaped actions."""
+    return action in _STRING_ACTIONS
 
 
 def materialize_none(shape: StaticAnnotation) -> Materialization:

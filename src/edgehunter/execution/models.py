@@ -148,6 +148,13 @@ class RuntimeObservation:
     ``opaque_return`` is set instead of ``return_value`` when the target returned
     something the protocol cannot represent. That is not a failure: the call
     completed and the value is simply not described.
+
+    The exception identity fields are Phase 7A additions and every one of them is
+    optional. A result document written before they existed decodes with all of
+    them ``None``, which is not the same as ``exception_builtin is False``: the
+    absence of a field means the identity was never observed, not that the class
+    was proven to be a custom one. Keeping "unknown" representable is what stops
+    the richer observation from silently upgrading a verdict.
     """
 
     outcome: OutcomeKind
@@ -155,6 +162,26 @@ class RuntimeObservation:
     opaque_return: str | None = None
     exception_type: str | None = None
     exception_message: str | None = None
+    exception_module: str | None = None
+    """``__module__`` of the raised class, as read in the sandbox."""
+
+    exception_qualname: str | None = None
+    """``__qualname__`` of the raised class, as read in the sandbox."""
+
+    exception_builtin: bool | None = None
+    """True only when the class *is* a real ``builtins`` exception class.
+
+    ``None`` means the worker did not report it. A class merely named
+    ``ValueError`` is ``False``, not ``True``.
+    """
+
+    exception_builtin_lineage: tuple[str, ...] | None = None
+    """Builtin exception classes in the class's real MRO, most derived first.
+
+    ``None`` when the worker reported no lineage at all, which is what keeps an
+    older result document from being read as "proven not a subclass".
+    """
+
     captured_stdout: str = ""
     captured_stderr: str = ""
     stdout_truncated: bool = False
@@ -176,6 +203,20 @@ class RuntimeObservation:
             size = len(self.return_value.items) or len(self.return_value.pairs)
             return f"{self.return_value.kind.value} of {size} item(s)"
         return self.return_value.scalar
+
+    @property
+    def exception_identity_text(self) -> str:
+        """A human rendering of the observed exception class identity.
+
+        The qualified form is used when the sandbox supplied one, because a bare
+        name does not identify a class uniquely. Falls back to the bare name, and
+        then to ``unknown``.
+        """
+        if self.exception_qualname:
+            if self.exception_module and self.exception_module != "builtins":
+                return f"{self.exception_module}.{self.exception_qualname}"
+            return self.exception_qualname
+        return self.exception_type or "unknown"
 
 
 @dataclass(frozen=True, slots=True)

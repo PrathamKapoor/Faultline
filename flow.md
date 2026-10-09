@@ -111,6 +111,15 @@ inside `analyze_repository()` alongside `build_oracle_analysis()`.
 Where the data ends up: stdout (statistics, optional detail sections, source
 issues). Nothing is written to disk and no state is kept between invocations.
 
+Printed values pass through `cli.py::_display_text()`, a presentation-only
+transform: it escapes every character outside printable ASCII (so a NUL byte, an
+emoji, and a CJK character are never written to a terminal, whatever the host's
+console encoding) and compacts anything longer than 80 rendered characters to a
+prefix plus its true length. It never touches the stored `value_text`, so the
+plans, the codec, and the execution layer all keep the exact literal. Values that
+are already safe to print — `float("nan")`, `""`, `-0.0`, `[0, 0]` — are emitted
+byte-identically, so the rule cannot silently change unrelated output.
+
 Error behavior: `ScanError` (missing path, unsupported target) prints
 `error: <message>` to stderr and exits 2 (`EXIT_INVALID_INPUT`). A scan that
 completes but finds unreadable or unparseable files exits 1
@@ -191,11 +200,11 @@ per-file helper.
 
 ## 11. Generation rules (src/edgehunter/generation/)
 
-- The action vocabulary is closed: `SemanticActionKind` has fourteen members and `BOUNDARY_ACTIONS` maps all ten `BoundaryKind` values one-to-one onto ten of them. The other four (`SET_NONE`, `EMPTY_COLLECTION`, `SINGLETON_COLLECTION`, `DUPLICATE_ELEMENT_COLLECTION`) are annotation-driven and have no boundary counterpart. Nothing else can be proposed.
+- The action vocabulary is closed: `SemanticActionKind` has twenty-one members and `BOUNDARY_ACTIONS` maps all ten `BoundaryKind` values one-to-one onto ten of them. The other eleven are annotation-driven and have no boundary counterpart: `SET_NONE`, the three collection shapes, the two boolean values, and the five string edge shapes. Nothing else can be proposed.
 - Every action records its origin: `BOUNDARY` (a mined candidate justified it) or `ANNOTATION` (the declared annotation did).
 - Actions are selected per parameter, deduplicated by `(parameter, kind, reference)`, and ordered by `(parameter, ACTION_KIND_ORDER, reference)`.
 - Applicability for numeric actions comes from Phase 2's boundary candidates, whose annotation rule now reads the static shape: a nullable `int | None` is still an integer, and `bool` is still not numeric.
-- Applicability for collection and nullability actions is decided from the static annotation shape (section 12), not from annotation text, so `list[int]`, `dict[str, int]`, and `int | None` are all recognized.
+- Applicability for collection, boolean, string, and nullability actions is decided from the static annotation shape (section 12), not from annotation text, so `list[int]`, `dict[str, int]`, `bool`, `str`, and `int | None` are all recognized. A parameter whose shape is `UNKNOWN` gets no boolean or string action: a name such as `name`, `text`, or `flag` is not type evidence.
 - Annotation-derived actions are restricted to single-value parameter buckets; `*args`/`**kwargs` never receive a generic action.
 - Untyped parameters are not excluded: they still receive actions derived from their own comparisons.
 - Materialization is `CONCRETE`, `SYMBOLIC`, or `UNSUPPORTED`. Integer literal references use exact neighbours (`9`/`10`/`11`); float references use `math.nextafter` and are rendered with `repr`; other literal kinds can be matched exactly but not stepped.
@@ -203,6 +212,9 @@ per-file helper.
 - Stepping around a `complex` literal is `UNSUPPORTED`. Literal text is parsed with `int`/`float`, never `eval` or `ast.literal_eval`.
 - Empty collections render as `[]`, `()`, `{}`, `set()` unconditionally, because an empty container needs no element knowledge. A singleton or repeated element renders only from a trustworthy element baseline (`[0]`, `("",)`, `{False}`, `{"": 0}`); an unknown element type is `UNSUPPORTED` with a reason, and no placeholder element is ever fabricated.
 - A candidate case holds exactly one action. It never combines actions and never supplies a value for another parameter. Invocation planning (section 14) adds fillers above this layer without changing it.
+- Boolean values are written as the Python literals `False` and `True` with `LiteralKind.BOOLEAN`, never as `0` and `1`, and `materialize_bool()` refuses a shape that is not `BOOL` rather than coercing it.
+- The five string values are fixed constants: `""`, `" "`, `"é漢🙂"`, `"\x00"`, and `"a" * 1024`. `materialize_string()` refuses a shape that is not `STR`. The long-string length is the module constant `LONG_STRING_LENGTH`; neither the target nor the CLI can influence it, and the value is never truncated.
+- `render_string_literal()` is the single rendering used for string values, so the action text, the strategy text, and the `str` baseline all spell one value identically and the by-text dedup below cannot list it twice.
 - `missing_parameters` lists the target's required parameters a case leaves uncovered: no default, not `*args`/`**kwargs`, not a method's `self`/`cls` receiver.
 - Completeness is `COMPLETE` (concrete, nothing required left), `PARTIAL` (concrete, other required parameters uncovered), or `SYMBOLIC` (value still depends on a name).
 - Only `CONCRETE` and `SYMBOLIC` actions become cases; an `UNSUPPORTED` action stays in the action list with its reason.
@@ -247,9 +259,9 @@ per-file helper.
 ## 15. Strategy plan rules (src/edgehunter/generation/strategy.py)
 
 - `StrategyPlan` describes how a parameter could be generated. It is framework-independent; no generator library is used and none is required.
-- Deterministic example sets: `int` → `0`/`1`/`-1`; `float` → those plus `-0.0`, `NaN`, `±Infinity`; `bool` → `False`/`True`; `str` → `""`, `" "`, a non-ASCII sample, `\x00`, and a 64-character string; containers reuse the materializer's empty/singleton/repeated values; a nullable shape adds `None`.
+- Deterministic example sets: `int` → `0`/`1`/`-1`; `float` → those plus `-0.0`, `NaN`, `±Infinity`; `bool` → `False`/`True`; `str` → `""`, `" "`, `"é漢🙂"`, `"\x00"`, and a 1024-character string (the same constants the string actions use, so the strategy cannot drift from the action layer); containers reuse the materializer's empty/singleton/repeated values; a nullable shape adds `None`.
 - Boundary-derived values are labelled with the boundary and reference they came from, for example `just_above.10`.
-- Values are deduplicated by rendered text, never by equality, because `NaN != NaN` would make equality-based deduplication unpredictable for the float specials.
+- Values are deduplicated by rendered text, never by equality, because `NaN != NaN` would make equality-based deduplication unpredictable for the float specials. Sharing one renderer (`render_string_literal()`) with the string actions is what makes this dedup correct: two spellings of one value would otherwise become two rows listing the same input twice.
 - `UNKNOWN` with a symbolic dependency is `SYMBOLIC`; `UNKNOWN` without one and `UNION` are `UNSUPPORTED`.
 - `*args`/`**kwargs` receive no strategy entry.
 - Strategies exist only for targets that have at least one action.
@@ -346,14 +358,46 @@ python -m edgehunter.runtime.worker               src/edgehunter/runtime/worker.
       │     attribute missing / not callable ─────► TARGET_NOT_FOUND
       ├─ function(*args, **kwargs)                exactly once
       │     BaseException ────────────────────────► RAISED + exception_type + exception_message
+      │       └─ _exception_identity(exc)         module/qualname/builtin/lineage, safe metadata only
       └─ _encode_return(value)                    exact `type() is` checks
             representable ────────────────────────► RETURNED + return_value
             otherwise ────────────────────────────► RETURNED + opaque_return
- └─ write /output/result.json                     nonce + execution_id echoed back
+  └─ write /output/result.json                     nonce + execution_id echoed back
 ```
 
 The staged tree is appended to `sys.path`, never prepended, so a staged module
 cannot shadow a standard-library module the worker relies on.
+
+### 16.4.1 Observed exception identity (`_exception_identity`)
+
+```text
+_exception_identity(exc)                          runtime/worker.py
+ ├─ type(exc)                                     the class object itself
+ ├─ type.__getattribute__(cls, "__module__")       NOT cls.__module__
+ │     └─ why: ordinary attribute access runs a custom metaclass's
+ │               __getattribute__, which is target code on the observation path
+ ├─ type.__getattribute__(cls, "__qualname__")    same reason
+ ├─ _builtin_lineage(cls)                         walk the real __mro__
+ │    └─ each base tested by IDENTITY against _trusted_builtin_exception_classes()
+ │         └─ built from vars(builtins) — a fact about the standard library
+ └─ exception_builtin = cls in _trusted_builtin_exception_classes()
+```
+
+Emitted fields, all optional: `exception_module`, `exception_qualname`,
+`exception_builtin` (boolean), `exception_builtin_lineage` (list of names, most
+derived first, at most 16). Each is omitted when it cannot be read safely, so
+"unknown" stays distinguishable from "recorded". Nothing calls `repr`, `str`, or
+any method on the exception or its class, and nothing is serialized.
+
+The consequence that matters: a target's own `class ValueError(Exception)` has
+`exception_builtin = False` and a lineage that does **not** contain `ValueError`,
+while the real `builtins.ValueError` reports `True`. A name comparison could not
+tell them apart; class identity can.
+
+The worker image is cached. After editing `runtime/worker.py`, an old
+`edgehunter-runtime:1` still contains the previous worker and produces documents
+without these fields; the host reads them as unknown and keeps the Phase 6B
+name-only verdicts. `docker image rm edgehunter-runtime:1` forces the rebuild.
 
 ### 16.5 Cleanup
 
@@ -589,7 +633,7 @@ evaluate_run()                                    repository.py
  │       │           │   ├─ materialize(...)      values.py           — built-ins only
  │       │           │   └─ compare_typed_values() compare.py          — Python's operators
  │       │           └─ canonical_value_text(...) values.py           — NaN / -0.0 safe
- │       │       └─ reconcile(evaluated)          evaluator.py       — conflicts, not a pick
+ │       │   └─ reconcile(evaluated)          evaluator.py       — conflicts, not a pick
  │       └─ observation_key(result)                evaluator.py       — identity, not equality
  └─ build_evaluation_report(...)                   repository.py
      ├─ assertion_observed(...)                    evaluator.py       — ASSERTION_OBSERVED
@@ -598,6 +642,50 @@ evaluate_run()                                    repository.py
      └─ build_findings(...)                        findings.py
          └─ deduplicate_findings(...)              findings.py       — deterministic key
 ```
+
+### 18.3.1 Exception identity and matching (Phase 7A)
+
+```text
+RuntimeObservation                    execution/models.py
+ ├─ exception_type            (bare name, as before)
+ ├─ exception_module          (new, optional)
+ ├─ exception_qualname        (new, optional)
+ ├─ exception_builtin         (new, bool | None — None means never observed)
+ └─ exception_builtin_lineage (new, tuple | None)
+        │
+        └─ identity_from_observation(observation)      evaluator.py
+              └─ ExceptionIdentity                    evaluation/exceptions.py
+                     └─ match_exception_observed(expected, identity,
+                                                  expected_binding=...)   exceptions.py
+```
+
+`match_exception_observed()` decides in this order:
+
+```text
+expected is None                       ──► INCONCLUSIVE
+no observation at all                  ──► INCONCLUSIVE
+test module binds the expected name    ──► INCONCLUSIVE   (shadowing, D-076)
+expected is not a builtin class        ──► INCONCLUSIVE   (always, D-075)
+─────────────────────────────────────────────────────────────────────────────
+expected IS a builtin class:
+  observed.exception_builtin is True
+      name is a builtin descendant     ──► MATCH  (matched_subclass=True)
+      otherwise                        ──► MISMATCH
+  observed.exception_builtin is False
+      lineage contains the expected    ──► MATCH  (matched_subclass=True)
+      lineage lacks it (proven)        ──► MISMATCH
+      lineage unknown (None)           ──► INCONCLUSIVE
+  observed.exception_builtin is None   ──► Phase 6B name-only rules, unchanged
+```
+
+The two things this ladder deliberately refuses:
+
+* **A custom expected class is never matched.** `pytest.raises(app.errors.
+  InvalidInput)` against an observed `app.errors.InvalidInput` stays
+  `INCONCLUSIVE`, because the test module's own binding of that name is unknown
+  and resolving it needs import resolution, which is not performed.
+* **A name difference is never a mismatch by itself.** Only a real MRO walk
+  against the trusted builtin classes can conclude a non-derivation.
 
 ### 18.4 Comparison rules
 
@@ -673,7 +761,13 @@ distinct finding.
 - Ambiguous or unresolved test callees are never attached to a target.
 - Non-literal test arguments are never evaluated, and the test is never run.
 - Declared defaults are never evaluated, so `f(1)` and `f(1, 10)` stay distinct.
-- Custom exception identity from a bare name is `INCONCLUSIVE`.
+- A custom expected exception stays `INCONCLUSIVE` even when the observed
+  qualified name is textually identical. Richer observation is not a licence to
+  match.
+- An exception's builtin identity is decided by class identity in the sandbox,
+  never by its name, and a name difference alone is never a mismatch.
+- A result document with no identity fields is not read as "not a builtin"; it is
+  read as unknown, and the name-only rules apply as they did in Phase 6B.
 - Structural risk scores are never converted into severity.
 
 ### 18.9 Artifact
@@ -710,3 +804,25 @@ captured target output and exception messages are deliberately excluded
 | docs | Added D-058 through D-069 and this flow section | decisions.md, flow.md | b64e97f | none |
 | docs | Documented `--evaluate`, the status table, reproduction, deliberate non-inferences, and the worker-trust limitation | README.md | b64e97f | none |
 | config | Added `.edgehunter/` to `.gitignore` so generated evaluation artifacts can never be committed | .gitignore | b64e97f | D-069 |
+
+## Changes in this session (Phase 7A — Action Coverage Repair + Exception Identity Hardening)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| generation | Root-caused the missing `bool`/`str` plans to a missing `ANNOTATION_ACTIONS` entry, not the annotation parser; added `BOOL` and `STR` entries so both shapes produce actions, cases, plans, and strategies | src/edgehunter/generation/actions.py | uncommitted | D-070 |
+| generation | Grew `SemanticActionKind` from fourteen to twenty-one with `SET_FALSE`, `SET_TRUE`, and the five string edge actions; `BOUNDARY_ACTIONS` unchanged and still total and injective | src/edgehunter/generation/models.py | uncommitted | D-071 |
+| generation | Added `materialize_bool()` and `materialize_string()`, both refusing a mismatched shape rather than coercing; bounded `LONG_STRING_LENGTH = 1024`; exported the constants and predicates | src/edgehunter/generation/materialize.py, src/edgehunter/generation/__init__.py | uncommitted | D-071 |
+| generation | Added `render_string_literal()` as the one rendering for string values, shared with the strategy table; removed the strategy's private long-string constant | src/edgehunter/generation/materialize.py, src/edgehunter/generation/strategy.py | uncommitted | D-072 |
+| CLI | Added `_display_text()`: presentation-only ASCII escaping and length compaction for printed values, leaving the stored value exact | src/edgehunter/cli.py | uncommitted | D-072 |
+| worker | Added `_exception_identity()`: module, qualified name, builtin-by-identity, and real-MRO builtin lineage, read with `type.__getattribute__` so a custom metaclass never runs | src/edgehunter/runtime/worker.py | uncommitted | D-073 |
+| execution | `RuntimeObservation` gained four optional exception-identity fields plus `exception_identity_text`; the host decoder refuses malformed values instead of coercing them | src/edgehunter/execution/models.py, src/edgehunter/execution/repository.py | uncommitted | D-073, D-074 |
+| worker | `_outcome()` now clips the exception message itself instead of relying on the call site | src/edgehunter/runtime/worker.py | uncommitted | D-074 |
+| evaluation | Replaced the name comparison with `match_exception_observed()`: a builtin expectation may use the real hierarchy or a trusted lineage, a custom expectation stays `INCONCLUSIVE`, and a document with no identity fields keeps the Phase 6B verdicts | src/edgehunter/evaluation/exceptions.py, src/edgehunter/evaluation/evaluator.py | uncommitted | D-075 |
+| oracle | `TestExpectationCandidate.exception_binding` records a test module's own module-scope binding of a bare raised name, so a shadowed builtin expectation stays `INCONCLUSIVE`; a qualified name is never affected | src/edgehunter/oracle/models.py, src/edgehunter/oracle/test_expectations.py | uncommitted | D-076 |
+| tests | Added boolean and string action suites covering the values, provenance, planning, strategy determinism, dedup, CLI escaping, and codec round-trip | tests/test_generation_bool_actions.py, tests/test_generation_string_actions.py | uncommitted | D-070, D-071, D-072 |
+| tests | Added real-Docker bool/str execution covering both booleans, all five strings, bool-is-not-int, empty-vs-NUL, and container cleanup | tests/test_generation_bool_str_integration.py | uncommitted | D-071 |
+| tests | Added exception-identity suites for builtin, custom, shadowed, subclass, same-name-different-module, and unknown cases, plus the false-positive guard that richer metadata never licenses a match | tests/test_evaluation_exception_identity.py | uncommitted | D-075 |
+| tests | Added protocol compatibility, malformed-metadata refusal, bounding, and no-deserialization tests, including that a version 1 document still decodes | tests/test_execution_exception_protocol.py | uncommitted | D-074 |
+| tests | Added real-Docker exception identity covering a real builtin, a shadowed same-name class, a genuine subclass, an unrelated exception, bounded metadata, and cleanup | tests/test_execution_exception_identity_integration.py | uncommitted | D-073 |
+| tests | Updated two existing tests whose expectations existed only because `bool`/`str` were unreachable; added a source-level shadowing-mining suite | tests/test_pipeline.py, tests/test_safety.py, tests/test_oracle_test_expectations.py | uncommitted | D-070, D-076 |
+| docs | Recorded D-070 through D-077, updated the generation, strategy, execution, and evaluation sections of this document | decisions.md, flow.md | uncommitted | D-070..D-077 |

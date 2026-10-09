@@ -33,10 +33,13 @@ from edgehunter.analysis.models import (
 )
 from edgehunter.generation.materialize import (
     Materialization,
+    is_string_action,
+    materialize_bool,
     materialize_collection,
     materialize_generic_numeric,
     materialize_none,
     materialize_relational,
+    materialize_string,
 )
 from edgehunter.generation.models import (
     ACTION_KIND_ORDER,
@@ -71,8 +74,17 @@ BOUNDARY_ACTIONS: Final[dict[BoundaryKind, SemanticActionKind]] = {
     BoundaryKind.NEGATIVE_INFINITY: SemanticActionKind.USE_NEGATIVE_INFINITY,
 }
 
-# Annotation-driven actions per recognized container kind. A repeated element is
-# offered only where order makes it meaningful, so a set does not get one.
+# Annotation-driven actions per recognized shape. A repeated element is offered
+# only where order makes it meaningful, so a set does not get one.
+#
+# `BOOL` and `STR` are here because no boundary candidate can reach them: Phase 2
+# mines relational boundaries for a parameter compared against something, and its
+# generic numeric candidates are restricted to `int`/`float` shapes. A `bool` or
+# `str` parameter was therefore given no action at all, which produced no
+# candidate case and so no invocation plan — the parameter was silently
+# unreachable rather than explicitly refused. These entries close that gap using
+# the recognized annotation shape, which is the same evidence source the container
+# entries already used.
 ANNOTATION_ACTIONS: Final[dict[AnnotationKind, tuple[SemanticActionKind, ...]]] = {
     AnnotationKind.LIST: (
         SemanticActionKind.EMPTY_COLLECTION,
@@ -92,10 +104,27 @@ ANNOTATION_ACTIONS: Final[dict[AnnotationKind, tuple[SemanticActionKind, ...]]] 
         SemanticActionKind.EMPTY_COLLECTION,
         SemanticActionKind.SINGLETON_COLLECTION,
     ),
+    AnnotationKind.BOOL: (
+        SemanticActionKind.SET_FALSE,
+        SemanticActionKind.SET_TRUE,
+    ),
+    AnnotationKind.STR: (
+        SemanticActionKind.EMPTY_STRING,
+        SemanticActionKind.WHITESPACE_STRING,
+        SemanticActionKind.UNICODE_STRING,
+        SemanticActionKind.NULL_CHARACTER_STRING,
+        SemanticActionKind.LONG_STRING,
+    ),
 }
 
 _OMITTABLE_PARAMETER_KINDS: Final[frozenset[ParameterKind]] = frozenset(
     {ParameterKind.VAR_POSITIONAL, ParameterKind.VAR_KEYWORD}
+)
+
+# The two boolean action kinds, named locally so the dispatch in
+# `_annotation_action` reads as a shape question rather than a set lookup.
+_BOOL_ACTIONS: Final[frozenset[SemanticActionKind]] = frozenset(
+    {SemanticActionKind.SET_FALSE, SemanticActionKind.SET_TRUE}
 )
 
 
@@ -270,6 +299,10 @@ def _annotation_action(
     """Build one action derived only from the parameter's annotation shape."""
     if kind is SemanticActionKind.SET_NONE:
         outcome = materialize_none(parameter.shape)
+    elif kind in _BOOL_ACTIONS:
+        outcome = materialize_bool(kind, parameter.shape)
+    elif is_string_action(kind):
+        outcome = materialize_string(kind, parameter.shape)
     else:
         outcome = materialize_collection(kind, parameter.shape)
     return _action(

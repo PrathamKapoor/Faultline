@@ -29,7 +29,14 @@ from pathlib import Path
 from typing import Final
 
 from edgehunter.analysis.models import BoundaryKind
-from edgehunter.generation.materialize import Materialization, materialize_collection
+from edgehunter.generation.materialize import (
+    LONG_STRING_LENGTH,
+    NULL_CHARACTER,
+    UNICODE_STRING_SAMPLE,
+    Materialization,
+    materialize_collection,
+    render_string_literal,
+)
 from edgehunter.generation.models import (
     LiteralKind,
     MaterializationStatus,
@@ -39,7 +46,14 @@ from edgehunter.generation.models import (
 from edgehunter.scanner.annotations import AnnotationKind, StaticAnnotation
 from edgehunter.scanner.models import FunctionInfo, ParameterInfo, ParameterKind
 
-_LONG_STRING: Final[str] = "a" * 64
+# The string strategy set is defined once, in the materializer, and read here
+# rather than restated. Before Phase 7A this module carried its own private
+# `_LONG_STRING = "a" * 64` and its own `"é"` sample, which meant the strategy
+# advertised a 64-character long string and a shorter non-ASCII sample while the
+# action layer had neither a long string nor a Unicode action at all, so the two
+# layers could drift apart silently. Sharing the constants is what makes
+# "the strategy describes the values the actions use" true by construction.
+_LONG_STRING: Final[str] = "a" * LONG_STRING_LENGTH
 
 
 class StrategyKind(str, Enum):
@@ -111,12 +125,22 @@ _PRIMITIVE_EXAMPLES: Final[dict[AnnotationKind, tuple[tuple[str, str, LiteralKin
         ("false", "False", LiteralKind.BOOLEAN),
         ("true", "True", LiteralKind.BOOLEAN),
     ),
-    AnnotationKind.STR: (
-        ("empty", '""', LiteralKind.TEXT),
-        ("space", '" "', LiteralKind.TEXT),
-        ("unicode", '"é"', LiteralKind.TEXT),
-        ("nul", '"\\x00"', LiteralKind.TEXT),
-        ("long", f'"{_LONG_STRING}"', LiteralKind.TEXT),
+    # Rendered by the same `render_string_literal` the string actions use, and
+    # over the same constants. Before Phase 7A this table hand-wrote its
+    # spellings (`""`, `" "`, `"é"`) with its own private 64-character long
+    # string, while the action layer had no string actions at all. Now that both
+    # layers spell a string identically, the by-text dedup in `_collect_values`
+    # collapses the primitive example and the action-derived value for the same
+    # string into one entry instead of listing the same input twice.
+    AnnotationKind.STR: tuple(
+        (descriptor, render_string_literal(value), LiteralKind.TEXT)
+        for descriptor, value in (
+            ("empty", ""),
+            ("space", " "),
+            ("unicode", UNICODE_STRING_SAMPLE),
+            ("nul", NULL_CHARACTER),
+            ("long", _LONG_STRING),
+        )
     ),
     AnnotationKind.NONE: (("none", "None", LiteralKind.NOTHING),),
 }

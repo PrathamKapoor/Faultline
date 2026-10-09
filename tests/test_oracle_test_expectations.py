@@ -258,3 +258,91 @@ def test_test_file_recognition_rule() -> None:
     assert is_test_file(Path("tests/module_test.py")) is True
     assert is_test_file(Path("examples/demo.py")) is False
     assert is_test_file(Path("src/testing_helper.py")) is False
+
+
+class TestRaisedNameShadowing:
+    """A bare ``pytest.raises(Name)`` is only a builtin when nothing shadows it."""
+
+    def test_no_binding_is_recorded_for_an_ordinary_test(self, tmp_path: Path) -> None:
+        items = mine(
+            tmp_path,
+            {
+                "m.py": "def validate(x):\n    raise ValueError(x)\n",
+                "test_m.py": (
+                    "import pytest\n"
+                    "from m import validate\n"
+                    "def test_bad():\n"
+                    "    with pytest.raises(ValueError):\n"
+                    "        validate(-1)\n"
+                ),
+            },
+        )
+
+        expectation = only(items)
+        assert expectation.exception == "ValueError"
+        assert expectation.exception_binding is None
+
+    def test_a_module_level_class_of_the_same_name_is_recorded(self, tmp_path: Path) -> None:
+        items = mine(
+            tmp_path,
+            {
+                "m.py": "def validate(x):\n    raise ValueError(x)\n",
+                "test_m.py": (
+                    "import pytest\n"
+                    "from m import validate\n"
+                    "class ValueError(Exception):\n"
+                    "    pass\n"
+                    "def test_bad():\n"
+                    "    with pytest.raises(ValueError):\n"
+                    "        validate(-1)\n"
+                ),
+            },
+        )
+
+        expectation = only(items)
+        assert expectation.exception == "ValueError"
+        assert expectation.exception_binding is not None
+        assert "ValueError" in expectation.exception_binding
+
+    def test_an_import_of_the_same_name_is_recorded(self, tmp_path: Path) -> None:
+        items = mine(
+            tmp_path,
+            {
+                "m.py": "def validate(x):\n    raise ValueError(x)\n",
+                "test_m.py": (
+                    "import pytest\n"
+                    "from m import validate\n"
+                    "from mypkg.errors import ValueError\n"
+                    "def test_bad():\n"
+                    "    with pytest.raises(ValueError):\n"
+                    "        validate(-1)\n"
+                ),
+            },
+        )
+
+        expectation = only(items)
+        assert expectation.exception_binding is not None
+        assert "ValueError" in expectation.exception_binding
+
+    def test_a_dotted_expectation_checks_its_own_final_name(self, tmp_path: Path) -> None:
+        items = mine(
+            tmp_path,
+            {
+                "m.py": "def validate(x):\n    raise ValueError(x)\n",
+                "test_m.py": (
+                    "import pytest\n"
+                    "from m import validate\n"
+                    "import errors\n"
+                    "class KeyError(Exception):\n"
+                    "    pass\n"
+                    "def test_bad():\n"
+                    "    with pytest.raises(errors.KeyError):\n"
+                    "        validate(-1)\n"
+                ),
+            },
+        )
+
+        expectation = only(items)
+        assert expectation.exception == "errors.KeyError"
+        # `errors.KeyError` cannot be decided from the binding of a bare `KeyError`.
+        assert expectation.exception_binding is None

@@ -17,6 +17,7 @@ syntactic.
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Final, NamedTuple
@@ -63,11 +64,12 @@ def extract_test_expectations(source: SourceFile) -> tuple[TestExpectationCandid
         return ()
 
     mined: list[TestExpectationCandidate] = []
+    bindings = _module_bindings(source.tree)
     for node in ast.walk(source.tree):
         if isinstance(node, ast.Assert) and node.test is not None:
             mined.extend(_assert_expectations(node, source.relative_path))
         elif isinstance(node, (ast.With, ast.AsyncWith)):
-            mined.extend(_raises_expectations(node, source.relative_path))
+            mined.extend(_raises_expectations(node, source.relative_path, bindings))
 
     return deduplicate_expectations(mined)
 
@@ -230,8 +232,49 @@ def _call_shape(call: ast.Call) -> _CallShape:
     )
 
 
+def _module_bindings(tree: ast.Module) -> Mapping[str, str]:
+    """Names the test module binds at module scope, mapped to how they are bound.
+
+    A narrow shadowing check, and deliberately the only one. A test module that
+    writes ``class ValueError(Exception)`` and then ``pytest.raises(ValueError)``
+    means *its own* class, so the bare spelling is not evidence of a
+    standard-library class. Importing the module to find out is forbidden, so this
+    records the conflicting source binding and lets the evaluator treat the
+    expectation as undecided instead of guessing.
+
+    Only module-scope bindings are recorded, and only for a bare
+    ``pytest.raises(Name)``: a qualified ``pytest.raises(mypkg.Name)`` names an
+    attribute, which a module-level binding of the same short name cannot shadow.
+    A local ``from x import Y`` inside one test function is still visible to that
+    ``pytest.raises``, but resolving which function a given ``with`` sits in is
+    more machinery than this phase justifies, so that limitation is documented
+    rather than approximated.
+    """
+    bindings: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            bindings.setdefault(node.name, f"class or function {node.name}")
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bindings.setdefault(target.id, f"assignment to {target.id}")
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            bindings.setdefault(node.target.id, f"annotated assignment to {node.target.id}")
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bindings.setdefault(alias.asname or alias.name, f"import of {alias.name}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings.setdefault(
+                    alias.asname or alias.name.split(".")[0], f"import of {alias.name}"
+                )
+    return bindings
+
+
 def _raises_expectations(
-    node: ast.With | ast.AsyncWith, relative_path: Path
+    node: ast.With | ast.AsyncWith,
+    relative_path: Path,
+    bindings: Mapping[str, str],
 ) -> list[TestExpectationCandidate]:
     call = _raises_call(node)
     if call is None:
@@ -251,6 +294,12 @@ def _raises_expectations(
             callee=_callee_name(body_call),
             call_expression=call_text,
             exception=exception,
+            # Only a bare name can be shadowed. `errors.KeyError` names a
+            # qualified attribute, so a module-level `class KeyError` beside it
+            # says nothing about which class the qualifier resolves to.
+            exception_binding=(
+                bindings.get(exception) if exception is not None and "." not in exception else None
+            ),
             literal_arguments=shape.literal_arguments,
             argument_positions=shape.argument_positions,
             positional_argument_count=shape.positional_argument_count,
