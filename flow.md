@@ -694,19 +694,19 @@ captured target output and exception messages are deliberately excluded
 
 | Area | Change | Files | Commit | Decision |
 |---|---|---|---|---|
-| evaluation | Added the `evaluation` package with the six-status `OracleStatus` vocabulary, finding kinds, reproduction status, and provenance records | src/edgehunter/evaluation/__init__.py, src/edgehunter/evaluation/models.py | uncommitted | D-058, D-066 |
-| evaluation | Added exact applicability: same target, all-literal arguments, no starred args, same signature-bound parameter values, structural `BoundCall` comparison | src/edgehunter/evaluation/applicability.py | uncommitted | D-059 |
-| evaluation | Added safe comparison over decoded protocol values using Python's own operator semantics, with identity limited to `None` and `TypeError` becoming `UNSUPPORTED` | src/edgehunter/evaluation/compare.py | uncommitted | D-060 |
-| evaluation | Added built-in exception hierarchy matching derived from `builtins.__mro__`, with custom exception identity reported inconclusive rather than guessed | src/edgehunter/evaluation/exceptions.py | uncommitted | D-061 |
-| evaluation | Added materialization and canonical identity text so `NaN` and `-0.0` stay distinguishable during dedup and recheck comparison | src/edgehunter/evaluation/values.py | uncommitted | D-060 |
-| evaluation | Added the evaluator: applicability first, then verdict; infrastructure failures always inconclusive; conflicting expectations reconciled, never picked | src/edgehunter/evaluation/evaluator.py | uncommitted | D-058, D-063, D-064 |
-| evaluation | Added finding classification with no severity field, deterministic hashed identifiers, and deterministic deduplication | src/edgehunter/evaluation/findings.py | uncommitted | D-066 |
-| evaluation | Added snapshot verification via SHA-256 comparison, per-attempt reproduction summaries, and a versioned JSON artifact that excludes target output | src/edgehunter/evaluation/repository.py | uncommitted | D-062, D-065, D-069 |
-| evaluation | Added attempt-sequence bookkeeping separating usable attempts from infrastructure failures | src/edgehunter/evaluation/recheck.py | uncommitted | D-065 |
-| oracle | Wired the mined call shape into the expectation record so positional counts, keyword arguments, and starred arguments are available for exact matching | src/edgehunter/oracle/test_expectations.py | uncommitted | D-059 |
-| execution | `RunOptions` gained a clamped `rechecks` field; `RunReport` gained the recheck mapping and the staged digests captured before cleanup | src/edgehunter/execution/repository.py, src/edgehunter/execution/models.py | uncommitted | D-062, D-065 |
-| CLI | `run` gained `--evaluate` and `--recheck`, plus the evaluation report; exit codes unchanged and `scan` unchanged | src/edgehunter/cli.py | uncommitted | D-067 |
-| tests | Added applicability, verdict, findings, safety, CLI, and real-Docker integration suites | tests/test_evaluation_applicability.py, tests/test_evaluation_verify.py, tests/test_evaluation_findings.py, tests/test_evaluation_safety.py, tests/test_evaluation_cli.py, tests/test_evaluation_integration.py | uncommitted | D-058..D-069 |
-| docs | Added D-058 through D-069 and this flow section | decisions.md, flow.md | uncommitted | none |
-| docs | Documented `--evaluate`, the status table, reproduction, deliberate non-inferences, and the worker-trust limitation | README.md | uncommitted | none |
-| config | Added `.edgehunter/` to `.gitignore` so generated evaluation artifacts can never be committed | .gitignore | uncommitted | D-069 |
+| evaluation | Added the `evaluation` package with the six-status `OracleStatus` vocabulary, finding kinds, reproduction status, and provenance records | src/edgehunter/evaluation/__init__.py, src/edgehunter/evaluation/models.py | b64e97f | D-058, D-066 |
+| evaluation | Added exact applicability: same target, all-literal arguments, no starred args, same signature-bound parameter values, structural `BoundCall` comparison | src/edgehunter/evaluation/applicability.py | b64e97f | D-059 |
+| evaluation | Added safe comparison over decoded protocol values using Python's own operator semantics, with identity limited to `None` and `TypeError` becoming `UNSUPPORTED` | src/edgehunter/evaluation/compare.py | b64e97f | D-060 |
+| evaluation | Added built-in exception hierarchy matching derived from `builtins.__mro__`, with custom exception identity reported inconclusive rather than guessed | src/edgehunter/evaluation/exceptions.py | b64e97f | D-061 |
+| evaluation | Added materialization and canonical identity text so `NaN` and `-0.0` stay distinguishable during dedup and recheck comparison | src/edgehunter/evaluation/values.py | b64e97f | D-060 |
+| evaluation | Added the evaluator: applicability first, then verdict; infrastructure failures always inconclusive; conflicting expectations reconciled, never picked | src/edgehunter/evaluation/evaluator.py | b64e97f | D-058, D-063, D-064 |
+| evaluation | Added finding classification with no severity field, deterministic hashed identifiers, and deterministic deduplication | src/edgehunter/evaluation/findings.py | b64e97f | D-066 |
+| evaluation | Added snapshot verification via SHA-256 comparison, per-attempt reproduction summaries, and a versioned JSON artifact that excludes target output | src/edgehunter/evaluation/repository.py | b64e97f | D-062, D-065, D-069 |
+| evaluation | Added attempt-sequence bookkeeping separating usable attempts from infrastructure failures | src/edgehunter/evaluation/recheck.py | b64e97f | D-065 |
+| oracle | Wired the mined call shape into the expectation record so positional counts, keyword arguments, and starred arguments are available for exact matching | src/edgehunter/oracle/test_expectations.py | b64e97f | D-059 |
+| execution | `RunOptions` gained a clamped `rechecks` field; `RunReport` gained the recheck mapping and the staged digests captured before cleanup | src/edgehunter/execution/repository.py, src/edgehunter/execution/models.py | b64e97f | D-062, D-065 |
+| CLI | `run` gained `--evaluate` and `--recheck`, plus the evaluation report; exit codes unchanged and `scan` unchanged | src/edgehunter/cli.py | b64e97f | D-067 |
+| tests | Added applicability, verdict, findings, safety, CLI, and real-Docker integration suites | tests/test_evaluation_applicability.py, tests/test_evaluation_verify.py, tests/test_evaluation_findings.py, tests/test_evaluation_safety.py, tests/test_evaluation_cli.py, tests/test_evaluation_integration.py | b64e97f | D-058..D-069 |
+| docs | Added D-058 through D-069 and this flow section | decisions.md, flow.md | b64e97f | none |
+| docs | Documented `--evaluate`, the status table, reproduction, deliberate non-inferences, and the worker-trust limitation | README.md | b64e97f | none |
+| config | Added `.edgehunter/` to `.gitignore` so generated evaluation artifacts can never be committed | .gitignore | b64e97f | D-069 |

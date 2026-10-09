@@ -596,7 +596,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-058: Six distinct oracle statuses, none of which is a synonym for another
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: Phase 6A recorded `RETURNED`, `RAISED`, `TIMEOUT`, and friends but deliberately judged nothing. The phase requires a vocabulary where "the target raised", "the sandbox would not start", "no oracle applies", and "an applicable oracle was contradicted" are all separately representable. A single boolean or a two-valued status would force at least one of those to be reported as another.
 - Decision: `OracleStatus` has exactly six members: `MATCH`, `MISMATCH`, `NOT_APPLICABLE`, `INCONCLUSIVE`, `UNSUPPORTED`, `CONFLICTING_EVIDENCE`. `UNSUPPORTED` is separate from `MISMATCH` because a comparison EdgeHunter cannot perform must never read as a contradiction. `INCONCLUSIVE` is where every infrastructure failure lands. The execution status (`OutcomeKind`) remains a separate dimension and is never rewritten: `RAISED` with `MATCH` is a normal outcome, which is what makes `with pytest.raises(ValueError): validate(-1)` verifiable.
 - Why: The whole value of this phase is that a reader can tell the difference between "the code disagrees with a recorded expectation" and "EdgeHunter could not find out". Merging the latter into the former would manufacture false bug reports, and merging them into silence would hide real ones. `UNSUPPORTED` earns its own member because the two failure directions need different remedies from a reader: one needs a broader comparison layer, the other needs a different invocation.
@@ -606,7 +606,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-059: An expectation covers one exact invocation and is never generalized
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: `assert add(1, 2) == 3` records one example. The tempting generalization is `add(a, b) == a + b`, which would report a mismatch for almost every real input and make EdgeHunter useless as a bug finder. The phase's central rule is that an expectation applies to the exact recorded input only.
 - Decision: Applicability requires (1) the same target identity, (2) every recorded argument being literal syntax, (3) no starred arguments, and (4) the same arguments bound to the same parameter names through the target's own signature. Both sides are reduced to a `BoundCall` of canonical `(parameter name, value text)` pairs and compared structurally. `add(1, 2)` and `add(a=1, b=2)` are recognized as the same invocation because Python binds both identically; `f(1)` and `f(1, 10)` are not, because equivalence would require evaluating a declared default, which this project never does. A non-literal argument, a starred argument, or an ambiguous callee is refused before any value is looked at.
 - Why: Argument binding through the signature is the only comparison that is both sound and meaningful. Comparing rendered call text would treat `add(1, 2)` and `add(a=1, b=2)` as different examples and would fail to bind a literal recorded at position 1 to the right parameter when an earlier argument was non-literal. The refusal to normalize omitted defaults is a deliberate limit: it is the one normalization that would require executing an expression.
@@ -616,7 +616,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-060: Comparison uses Python's own operator semantics, and a refusal is never a contradiction
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: The evaluator must decide whether an observed value satisfies a recorded assertion. Inventing a stricter equality than Python's would report a mismatch for an assertion Python itself considers satisfied: `True == 1` is true in Python, so an integer `1` must satisfy `assert f(1) == True`. A target-defined object is worse still, because comparing it would invoke its `__eq__` on the host.
 - Decision: `comparison/compare.py` applies the operator exactly as Python does, with no added type checks. Ordering that Python itself refuses with `TypeError` becomes `UNSUPPORTED`, never `MISMATCH`. Identity is supported only against the `None` singleton, because `x is y` between arbitrary values depends on identity EdgeHunter cannot observe and `==` is not a substitute. Every value reaching the comparison came from the Phase 6A codec's exact-type whitelist, so only built-ins are ever materialized and no user-defined comparison method can run. Observation identity for dedup and recheck comparison is rendered as canonical text, never decided by equality, so `NaN != NaN` and `-0.0 == 0.0` cannot collapse two distinguishable observations.
 - Why: Using Python's semantics is the only defensible rule: the repository's own test suite is the authority on what its code should do, and that test passes or fails by Python's rules. The ordering cast is safe because Python's `TypeError` remains the real authority and is caught into `UNSUPPORTED`.
@@ -626,7 +626,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-061: Builtin exception identity uses the real hierarchy; custom exception identity is `INCONCLUSIVE`
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: Phase 6A records an exception by `type(exc).__name__` only. `pytest.raises(ValueError)` is satisfied by `UnicodeDecodeError` in Python, but a bare `PaymentError` in a test and a bare `PaymentError` at runtime may be two unrelated classes from different modules.
 - Decision: `match_exception()` handles the two cases differently. A builtin expectation may use the real builtin hierarchy, which is derived by introspecting `builtins.__mro__` rather than a hand-written table, so it cannot drift from the interpreter. A qualified expectation (`pytest.raises(mypackage.MyError)`) only matches a fully qualified observation; a bare observation gives `INCONCLUSIVE`, because the test author named a specific class and the runtime cannot confirm it. A custom expectation matched only by bare name is always `INCONCLUSIVE`: two modules may define the same class name, and importing the target to find out is forbidden. When both sides are fully qualified and both are builtin, the hierarchy is applied, since `builtins` is then the only module either can be.
 - Why: The builtin hierarchy is a fact about the standard library, available without touching target code, so using it is sound. Custom class identity genuinely is not determinable from an unqualified name, and guessing from filename similarity is exactly the behaviour this project refuses.
@@ -636,7 +636,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-062: Source snapshots are verified by SHA-256 content fingerprint; no Git commit is invented
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: Oracle evidence describes a specific revision of a file. If the source changes between the scan and the execution, a mismatch could be reported against an expectation that describes different code. The phase requires the executed revision to be provably the analyzed one, or the verdict withheld.
 - Decision: `SourceSnapshot.verify()` compares the `ModuleAnalysis.digest` captured during the single read with the SHA-256 of the bytes actually staged for execution. Both must exist and be equal for `verified` to be true. Anything else yields `INCONCLUSIVE` with the reason `source snapshot not verified`. No Git commit hash is involved: a target repository may not use Git, so referencing or inventing one would be a fabrication. The staged digests are captured into `RunReport.staged_digests` before the temporary tree is deleted, so verification survives cleanup.
 - Why: A content fingerprint is the only identity available for a directory that is not necessarily a repository. Comparing the analyzed bytes with the executed bytes closes the scan/execute race completely, because the staged copy is what the container actually ran.
@@ -646,7 +646,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-063: Production assertions yield `ASSERTION_OBSERVED`, and guard reachability is never inferred
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: Phase 3 mined production `assert` conditions and `if ...: raise` guards as explicit evidence (D-024). Neither is a universal input contract. `assert balance >= 0` in a public function states a precondition the caller is expected to honour, and `if amount < 0: raise` existing in the source says nothing about whether that branch ran for a given input.
 - Decision: A raised `AssertionError` with no applicable exact expectation produces `ASSERTION_OBSERVED`, which is reported as needing review, never as a confirmed defect. Its oracle status is `INCONCLUSIVE` because EdgeHunter cannot decide whether the caller violated a precondition. Validation guards are retained by `guard_evidence()` as explanatory context, attached to a finding's detail line, and **never evaluated**. No guard predicate is evaluated on the host: no `eval`, no import of a target helper, no invocation of a target predicate. Returning normally proves nothing about which assertions inside the function were reached.
 - Why: The distinction the phase draws is between a fact about the run (an assertion fired) and a judgement about the code (the assertion was wrong). Only the first is available here. Reachability analysis is genuinely out of scope, and the optional "syntactically proven leading guard" subset the phase permits was skipped: implementing it correctly needs a formal specification of dominance and short-circuit evaluation that this phase has no budget to test exhaustively, and the phase explicitly allows skipping it when it threatens correctness.
@@ -656,7 +656,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-064: Conflicting applicable expectations are reported, and neither one is chosen
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: Two tests can disagree about one invocation: `assert f(1) == 2` and `assert f(1) == 3`. One of them will match whatever the runtime produced, so "pick the one that agrees" is trivially available and completely worthless.
 - Decision: `reconcile()` reports `CONFLICTING_EVIDENCE` whenever applicable oracles reach different verdicts, and retains every contributing source location. A match beside a mismatch is a conflict too, because the repository's evidence is genuinely inconsistent about that invocation. The verdict maps to `FindingKind.INCONCLUSIVE`, and no defect is claimed. With a single applicable oracle the verdict passes through unchanged.
 - Why: Choosing the matching oracle would make the evaluator unfalsifiable: it would always find agreement by construction. Reporting the conflict instead tells the user something actionable (their tests disagree) without claiming the code is wrong.
@@ -666,7 +666,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-065: Rechecking is opt-in, bounded, snapshot-fixed, and never counts a failure as confirmation
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: One mismatching execution is an observation. Repetition can strengthen it, but automatic retries would silently re-execute untrusted code and an environment failure could be mistaken for confirmation.
 - Decision: `RunOptions.rechecks` defaults to 0 and `RunOptions.bounded_rechecks()` clamps to `HARD_MAX_RECHECKS = 5`, so total containers per plan never exceed 6. `--recheck` is the only way to request it and `--evaluate` is required alongside. Every attempt reuses the *same* staged snapshot, so all attempts measure one revision by construction. Each attempt gets its own nonce and execution id; the protocol is not weakened for repetition. `summarize_reproduction()` reports `REPRODUCED` only when every attempt reached the same verdict, `FLAKY` when attempts disagreed, `RECHECK_FAILED` when any attempt could not be evaluated, and `NOT_RECHECKED` when rechecking was not requested. A timeout, import failure, or unavailable sandbox counts as a failure and never as a mismatch. Attempts are compared by normalized observation key — outcome kind plus typed value, or exception class — never by duration, execution id, container id, or temporary path.
 - Why: Every one of these rules closes a specific way of overstating. Opt-in stops surprise execution. Bounding stops runaway cost. Snapshot-fixing stops a source change between attempts masquerading as stability. Separating flakiness from reproduction stops unstable behaviour being called a stable bug. Excluding environment failures stops a broken Docker install being reported as a discovered defect.
@@ -676,7 +676,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-066: Findings carry no severity, and their identifiers are derived deterministically
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: A finding is the sentence a user reads, so it is where overstating is most tempting. Phase 3 risk scores are search-priority heuristics (D-022) and turning one into "HIGH severity bug" would be a category error.
 - Decision: `FindingCandidate` has no severity field at all, and `FindingKind` has no `CRITICAL`, `CONFIRMED_VULNERABILITY`, or similar member; the safety suite asserts the vocabulary is free of them. `FindingKind` is `OBSERVED_EXPECTATION_MISMATCH`, `REPRODUCED_EXPECTATION_MISMATCH`, `ASSERTION_OBSERVED`, `SUSPICIOUS_BEHAVIOR`, `INCONCLUSIVE`. `MATCH` and `UNSUPPORTED` produce no finding at all: an unsupported comparison is a limitation the report already shows, and a finding for it would be noise. Identifiers are `ehf-` plus the first 12 hex characters of a SHA-256 over target identity, source fingerprint, oracle location, invocation, and finding category, so the same case is named identically on every run and unrelated findings cannot collide. Deduplication uses that same key and merges findings only when it matches exactly, so the same exception class on different targets, inputs, or snapshots stays distinct.
 - Why: Omitting severity structurally is stronger than documenting that it is not computed: a field cannot be misused if it does not exist. Deriving the id from the identity rather than counting findings means a rerun of the same case is recognisably the same finding, and hashing rather than truncating a counter means two unrelated findings cannot share a name.
@@ -686,7 +686,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-067: `--evaluate` is additive and changes no exit code
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: Phase 6A established `run` exit codes 0/2/3 with `1` deliberately unused (D-057). Adding an evaluation flag is exactly the moment a project is tempted to add "bug found" as an exit code, which would let a caller act on a verdict without reading it.
 - Decision: `--evaluate` and `--recheck` are options on `run` only. Without `--evaluate` the output is byte-for-byte the Phase 6A observation report including its "Oracle evaluation: not performed" and "Finding: none" lines. `scan` gains no evaluation flag at all. Exit codes are unchanged: `0` when something ran and was observed, `2` for invalid input, `3` for refused or unavailable. A contradiction appears only in the output, never in the status. A negative `--recheck` is invalid input (2); an oversized one is clamped to the hard maximum rather than refused.
 - Why: Keeping "bug found" out of the exit status preserves D-057's property that a script can distinguish "the scan found something" from "the run did not happen", and keeps a verdict from being acted on without being read. Refusing rather than clamping a negative count is a user error worth reporting; clamping a large one is routine politeness.
@@ -696,7 +696,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-068: The evaluator is a pure host-side function, and re-execution lives in the execution layer
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: The phase requires that host-side evaluation execute no target code, be testable without Docker, and never bypass the existing `--allow-execution` authorization. Those three requirements are easiest to satisfy by construction rather than by discipline.
 - Decision: `evaluation/evaluator.py`, `applicability.py`, `compare.py`, `exceptions.py`, `values.py`, and `findings.py` are pure functions over already-decoded observations and already-mined evidence. They start no process, import nothing from the target repository, and never evaluate a target expression: recorded literals go through the Phase 6A codec's AST whitelist, and the only values materialized are built-ins the worker already produced with exact type checks. Bounded re-execution lives in `execution/repository.py`, where authorization, staging, and the Docker backend already were, so there is no second and weaker route into a container. `tests/test_evaluation_safety.py` walks the package's own AST and fails if any module gains `eval`/`exec`/`importlib`/`subprocess`/`pickle`, imports the Docker backend or the worker, or imports `ast.parse`/`json.loads` to build its own literal grammar.
 - Why: Keeping the boundary structural rather than documented means it cannot rot silently. Reusing the codec's recognizer is what guarantees a recorded expectation can never reach something that could evaluate it. Putting re-execution next to the existing runner means authorization is inherited rather than reimplemented.
@@ -706,7 +706,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-069: A versioned JSON artifact stores evidence only, and is Git-ignored
 
-- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), uncommitted
+- Date / phase / commit: 2026-10-09, Phase 6B (Runtime Oracle Evaluation), b64e97f
 - Context: Evaluation results need to persist so a run can be reviewed later, but runtime output and exception messages can contain sensitive data and the project has no database.
 - Decision: `write_evaluation_artifact()` writes strict JSON to `.edgehunter/runs/<run-id>/evaluation.json` with a `schema_version` field. The stored document contains target identity, source fingerprint, oracle kinds and statuses with reasons and evidence locations, reproduction state, and findings. It deliberately excludes captured target output and exception messages. The run id is sanitized to a single safe path segment so a crafted id cannot write outside the artifact directory. `.edgehunter/` is added to `.gitignore`.
 - Why: The artifact is meant for reproduction and diagnosis, and neither needs a target's stdout. Storing it would make the tool a place secrets accumulate. Versioning the schema makes a future change detectable rather than silently misread.

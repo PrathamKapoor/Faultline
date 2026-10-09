@@ -12,10 +12,10 @@
 - **Status:** complete
 
 Repository state at handoff: branch `main`, remote `origin` ->
-`PrathamKapoor/Faultline`. Implementation is uncommitted at the time this file
-was written; see `git log` for the real hashes. Version remains `0.1.0`; no bump
-was made (D-002 makes the version literal the single source, and no decision
-requires a bump).
+`PrathamKapoor/Faultline`. Implementation commit `b64e97f` ("feat: evaluate
+runtime observations against exact explicit oracles"). Version remains `0.1.0`;
+no bump was made (D-002 makes the version literal the single source, and no
+decision requires a bump).
 
 ## 2. Work Completed
 
