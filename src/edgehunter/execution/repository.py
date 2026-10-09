@@ -80,6 +80,14 @@ WORKER_IMAGE: Final[str] = "edgehunter-runtime:1"
 DEFAULT_MAX_CASES: Final[int] = 5
 HARD_MAX_CASES: Final[int] = 20
 
+HARD_MAX_RECHECKS: Final[int] = 5
+"""The absolute ceiling on extra attempts per plan.
+
+Rechecking is opt-in and bounded. Nothing in this module retries a failure on its
+own, retries are never automatic, and the total attempts per plan can never exceed
+``1 + HARD_MAX_RECHECKS``.
+"""
+
 BACKEND_NAME: Final[str] = "docker"
 
 
@@ -111,6 +119,13 @@ class RunOptions:
     target: str
     max_cases: int = DEFAULT_MAX_CASES
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    rechecks: int = 0
+    """Extra attempts per plan, only ever non-zero from an explicit request.
+
+    Zero is the default and nothing retries on its own. Each recheck reuses the
+    same staged snapshot and the same request shape, so a repetition measures the
+    same source revision rather than a new one.
+    """
 
     def bounded_case_limit(self) -> int:
         """Clamp the requested case count into the supported range."""
@@ -119,6 +134,15 @@ class RunOptions:
     def bounded_timeout(self) -> float:
         """Clamp the requested timeout into the supported range."""
         return clamp_timeout(self.timeout_seconds)
+
+    def bounded_rechecks(self) -> int:
+        """Clamp the requested recheck count into the supported range."""
+        return max(0, min(HARD_MAX_RECHECKS, self.rechecks))
+
+    @property
+    def attempts_per_plan(self) -> int:
+        """Total containers one plan may consume, always bounded."""
+        return 1 + self.bounded_rechecks()
 
 
 def execute_target(
@@ -165,12 +189,19 @@ def execute_target(
     run_root = Path(tempfile.mkdtemp(prefix="edgehunter-run-"))
     staged: StagedSource | None = None
     results: list[ExecutionResult] = []
+    rechecks: dict[str, tuple[ExecutionResult, ...]] = {}
     try:
         staged = _stage_workspace(source_root, run_root)
         for plan, function in selected:
-            results.append(
-                _execute_one(plan, function, staged, run_root, options.bounded_timeout())
-            )
+            first = _execute_one(plan, function, staged, run_root, options.bounded_timeout())
+            results.append(first)
+            if options.bounded_rechecks():
+                # Every attempt reuses the same staged snapshot, so all attempts
+                # measure the identical source revision by construction.
+                rechecks[first.action_id] = tuple(
+                    _execute_one(plan, function, staged, run_root, options.bounded_timeout())
+                    for _ in range(options.bounded_rechecks())
+                )
     except StagingError as exc:
         return RunReport(
             results=tuple(results),
@@ -180,6 +211,10 @@ def execute_target(
             skipped=refused,
         )
     finally:
+        # The staged digests are captured before deletion so oracle evaluation can
+        # still prove the executed bytes matched the analyzed ones after the tree
+        # is gone.
+        digests = staged.digests if staged is not None else ()
         cleanup_problem = _cleanup_problems(staged, run_root)
         if cleanup_problem is not None:
             sandbox = SandboxStatus(
@@ -189,7 +224,13 @@ def execute_target(
                 image=WORKER_IMAGE,
             )
 
-    return RunReport(results=tuple(results), sandbox=sandbox, skipped=refused)
+    return RunReport(
+        results=tuple(results),
+        sandbox=sandbox,
+        skipped=refused,
+        rechecks={key: value for key, value in rechecks.items()},
+        staged_digests=digests,
+    )
 
 
 def _cleanup_problems(staged: StagedSource | None, run_root: Path) -> str | None:

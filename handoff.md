@@ -2,247 +2,284 @@
 
 ## 1. Current Phase
 
-- **Phase:** Phase 6A — Isolated Execution Backend
+- **Phase:** Phase 6B — Runtime Oracle Evaluation
 - **Subphase:** none (single-session phase)
-- **Objective:** Execute Phase 5 invocation plans without ever importing or
-  invoking target code on the host, by adding a Docker-only backend with an
-  explicit opt-in, a typed protocol across the boundary, a deterministic
-  eligibility gate, safe staging, bounded observation, and verified cleanup —
-  while still claiming no defect, since no oracle evaluation exists yet.
+- **Objective:** Compare isolated execution observations against explicit,
+  applicable program expectations, without inventing correctness claims. Exact
+  input matching, safe comparison, expected-exception verification, source
+  snapshot verification, optional bounded reproduction, and conservative
+  evidence-backed findings.
 - **Status:** complete
 
-Repository state at handoff: branch `main`, no remote configured. Implementation
-commit `89865f7` ("Execute eligible plans in a hardened Docker sandbox with no
-host fallback") and documentation commit `71fa3ba`, followed by this metadata
-commit (see `git log`). Version remains `0.1.0`; no bump was made (D-002 makes
-the version literal the single source, and no decision requires a bump).
+Repository state at handoff: branch `main`, remote `origin` ->
+`PrathamKapoor/Faultline`. Implementation is uncommitted at the time this file
+was written; see `git log` for the real hashes. Version remains `0.1.0`; no bump
+was made (D-002 makes the version literal the single source, and no decision
+requires a bump).
 
 ## 2. Work Completed
 
-The repository had a green Phase 0-5 baseline (368 tests). This session added:
+The repository had a green Phase 6A baseline (558 passed, 1 skipped). This
+session added:
 
-- a strict typed-value protocol (`execution/codec.py`) with nine value kinds, a
-  versioned JSON document, special floats carried as text, deterministic set
-  ordering, and explicit depth, size, item, and string budgets
-- a rendered-literal reader that recognizes only literal AST nodes, so no value
-  is ever handed to `eval`
-- typed models for outcomes, eligibility, requests, runtime observations, staged
-  sources, sandbox status, and run reports (`execution/models.py`)
-- deterministic argument assembly that closes the positional run at the first
-  omitted default (`execution/assembly.py`)
-- an eligibility gate refusing unsupported status, kind, decorators, unsafe
-  paths, and unsupported values with a named reason (`execution/eligibility.py`)
-- safe staging: `.py` only, containment checks, symlink refusal, and hard
-  file-count and size limits (`execution/staging.py`)
-- a hardened `docker run` builder, availability check, bounded file-backed output
-  capture, host-owned timeout, forced cleanup, and container verification
-  (`execution/docker.py`)
-- orchestration that resolves one unambiguous target, stages once, runs one
-  container per plan, verifies the result, and deletes the temporary tree
-  (`execution/repository.py`)
-- the container-only worker, the sole code in the project that loads target code
-  (`runtime/worker.py`), plus its digest-pinned packaged `Dockerfile`
-- `edgehunter run` with `--target`, `--allow-execution`, `--max-cases`, and
-  `--timeout`, and a target resolver that refuses ambiguity
-- nine test suites: codec, assembly, eligibility, staging, docker arguments,
-  worker protocol, host/worker boundary, CLI, and real-Docker integration
+- a six-value `OracleStatus` vocabulary where no status is a synonym for another,
+  plus `FindingKind`, `ReproductionStatus`, `ApplicabilityKind`, and provenance
+  records (`evaluation/models.py`)
+- an exact applicability layer (`evaluation/applicability.py`): same target,
+  all-literal arguments, no starred arguments, and the same arguments bound to
+  the same parameter names through the target's own signature
+- safe comparison over already-decoded protocol values using Python's own
+  operator semantics (`evaluation/compare.py`), with `is`/`is not` restricted to
+  `None` and a Python `TypeError` becoming `UNSUPPORTED` rather than `MISMATCH`
+- built-in exception identity via the real hierarchy derived from
+  `builtins.__mro__`, with custom exception identity reported `INCONCLUSIVE`
+  (`evaluation/exceptions.py`)
+- canonical value identity as text, so `NaN` and `-0.0` stay distinguishable
+  during deduplication and recheck comparison (`evaluation/values.py`)
+- the evaluator itself (`evaluation/evaluator.py`): applicability runs first and
+  unconditionally, infrastructure failures are always `INCONCLUSIVE`, a raise that
+  satisfies `pytest.raises` is a `MATCH`, conflicting expectations are reconciled
+  rather than picked, and production assertions yield `ASSERTION_OBSERVED`
+- finding classification with no severity field, deterministic hashed identifiers,
+  and deterministic deduplication (`evaluation/findings.py`)
+- snapshot verification by SHA-256 comparison of analyzed and staged bytes, with
+  no Git commit invented (`evaluation/repository.py`)
+- bounded re-execution wired into the existing execution layer, plus attempt
+  bookkeeping that separates usable attempts from infrastructure failures
+  (`execution/repository.py`, `evaluation/recheck.py`)
+- a versioned JSON artifact that stores evidence and deliberately excludes
+  captured target output, plus `.edgehunter/` in `.gitignore`
+- `run --evaluate` and `run --recheck N`, with exit codes unchanged and `scan`
+  entirely untouched
+- six test suites: applicability, verdicts, findings, structural safety, CLI, and
+  real-Docker integration
 
 ## 3. Files Changed
 
-- `src/edgehunter/execution/codec.py` (new) — typed-value protocol and literal reader
-- `src/edgehunter/execution/models.py` (new) — outcome, eligibility, request, and report models
-- `src/edgehunter/execution/assembly.py` (new) — arguments to a real call
-- `src/edgehunter/execution/eligibility.py` (new) — deterministic refusal gate
-- `src/edgehunter/execution/staging.py` (new) — bounded read-only source copy
-- `src/edgehunter/execution/docker.py` (new) — the only host process launcher
-- `src/edgehunter/execution/repository.py` (new) — orchestration and result decoding
-- `src/edgehunter/execution/__init__.py` (new) — public interface
-- `src/edgehunter/runtime/worker.py` (new) — in-container target loader and invoker
-- `src/edgehunter/runtime/Dockerfile` (new) — pinned, non-root sandbox image
-- `src/edgehunter/runtime/__init__.py` (new) — package marker
-- `src/edgehunter/cli.py` — added the `run` command and target resolution
-- `pyproject.toml` — runtime package data and the `integration` test marker
-- `tests/test_execution_codec.py`, `tests/test_execution_assembly.py`,
-  `tests/test_execution_eligibility.py`, `tests/test_execution_staging.py`,
-  `tests/test_execution_docker.py`, `tests/test_execution_worker.py`,
-  `tests/test_execution_safety.py`, `tests/test_execution_cli.py`,
-  `tests/test_execution_integration.py` (all new)
-- `decisions.md` — D-045 through D-057
-- `flow.md` — execution rules, extended diagram, phase table
-- `README.md` — status, limitations, usage, architecture
+- `src/edgehunter/evaluation/__init__.py` (new) — public interface
+- `src/edgehunter/evaluation/models.py` (new) — statuses, findings, provenance
+- `src/edgehunter/evaluation/applicability.py` (new) — exact invocation binding
+- `src/edgehunter/evaluation/compare.py` (new) — Python-semantics comparison
+- `src/edgehunter/evaluation/exceptions.py` (new) — exception identity
+- `src/edgehunter/evaluation/values.py` (new) — materialization and identity text
+- `src/edgehunter/evaluation/evaluator.py` (new) — applicability then verdict
+- `src/edgehunter/evaluation/findings.py` (new) — classification and dedup
+- `src/edgehunter/evaluation/repository.py` (new) — snapshots, reproduction, artifact
+- `src/edgehunter/evaluation/recheck.py` (new) — attempt sequence bookkeeping
+- `src/edgehunter/oracle/test_expectations.py` — records the mined call shape
+- `src/edgehunter/execution/repository.py` — `rechecks` option, snapshot-fixed attempts
+- `src/edgehunter/execution/models.py` — `RunReport.rechecks`, `RunReport.staged_digests`
+- `src/edgehunter/cli.py` — `--evaluate`, `--recheck`, evaluation output
+- `.gitignore` — `.edgehunter/`
+- `tests/test_evaluation_applicability.py`, `tests/test_evaluation_verify.py`,
+  `tests/test_evaluation_findings.py`, `tests/test_evaluation_safety.py`,
+  `tests/test_evaluation_cli.py`, `tests/test_evaluation_integration.py` (all new)
+- `decisions.md` — D-058 through D-069
+- `flow.md` — section 18 and the phase table
+- `README.md` — status, `--evaluate`, status table, limitations, roadmap
 
 ## 4. Current Architecture / State
 
-The isolation boundary is now structural rather than documentary. `scan` is
-unchanged and still purely static. `run` adds a second path:
+The separation the phase exists to establish is now structural:
 
 ```text
 host                                          container
-──────────────────────────────────────       ────────────────────────────
+──────────────────────────────────────       ───────────────────────────
 execution/repository.py                      runtime/worker.py
-  resolve one unambiguous target                read + validate request
-  check_relative_path / check_eligibility       resolve the staged file
-  assemble_invocation                           decode typed values
-  stage read-only copy                          import module (only here)
-  build hardened docker run  ─────────────►     invoke once, fds 1/2 → /dev/null
-  timeout, forced cleanup                       bounded output capture
-  verify nonce + id + keys      ◄───────────    write /output/result.json
-  report an observation
+  authorize, select, stage, run N attempts     read + validate request
+  recheck within the same snapshot             resolve the staged file
+  decode one result per attempt                decode typed values
+  capture staged digests       ◄────────       import module (only here)
+                                              invoke once
+evaluation/evaluator.py                        write /output/result.json
+  applicability → verdict → finding
+  pure: no process, no target import
 ```
 
-`execution/` contains no module that can import target code. `tests/test_execution_safety.py`
-walks the package AST and fails if any module other than `runtime/worker.py`
-gains `eval`/`exec`/`importlib`/a deserializer, or if host code imports the
-worker, or if the static entry point reaches into `execution`.
+`evaluation/` contains no module that can execute code, reach an interpreter, or
+import the Docker backend. `tests/test_evaluation_safety.py` walks the package's
+own AST and fails if that ever changes, if it gains `eval`/`exec`/`importlib`/
+`subprocess`/`pickle`, if it imports the worker, or if `pipeline.py` pulls it in.
 
-Outcomes are `RETURNED`, `RAISED`, `TIMEOUT`, `IMPORT_FAILURE`,
-`TARGET_NOT_FOUND`, `PROTOCOL_ERROR`, `WORKER_FAILURE`, plus the report-level
-`NOT_REQUIRED`, `UNAVAILABLE`, `READY`, `ERROR`. `run` exits `0`, `2`, or `3`;
-`1` is never used so a refusal cannot be read as "issues found".
+Statuses are `MATCH`, `MISMATCH`, `NOT_APPLICABLE`, `INCONCLUSIVE`,
+`UNSUPPORTED`, `CONFLICTING_EVIDENCE`. Findings are
+`OBSERVED_EXPECTATION_MISMATCH`, `REPRODUCED_EXPECTATION_MISMATCH`,
+`ASSERTION_OBSERVED`, `SUSPICIOUS_BEHAVIOR`, `INCONCLUSIVE`. There is no severity
+field anywhere, and `FindingKind` has no `CRITICAL` or `CONFIRMED_VULNERABILITY`
+member — a test asserts that.
 
 ## 5. Decisions Made
 
-D-045 Docker is the only backend, with no host fallback.
-D-046 Strict typed JSON; rendered literals recognized by an AST whitelist.
-D-047 The result travels in a file guarded by a nonce, never on stdout.
-D-048 Returns described by exact built-in type checks; anything else opaque.
-D-049 The positional run closes at the first omitted default.
-D-050 Output bounded on both sides; the capture never grows without limit.
-D-051 Host-side process output captured through files, not an in-memory pipe.
-D-052 A target is path plus qualified name; ambiguity is refused.
-D-053 Path validation reads paths as Windows paths as well as POSIX paths.
-D-054 `None` is a supported return kind, not an unrepresentable one.
-D-055 Cleanup is verified rather than assumed; deletion failures are reported.
-D-056 The worker image is built from EdgeHunter's own packaged sources.
-D-057 Execution is opt-in only; a missing or duplicate result is never a pass.
+D-058 Six distinct oracle statuses, none a synonym for another.
+D-059 An expectation covers one exact invocation and is never generalized.
+D-060 Comparison uses Python's own operator semantics; a refusal is never a contradiction.
+D-061 Builtin exception identity uses the real hierarchy; custom identity is `INCONCLUSIVE`.
+D-062 Source snapshots verified by SHA-256 content fingerprint; no Git commit invented.
+D-063 Production assertions yield `ASSERTION_OBSERVED`; guard reachability never inferred.
+D-064 Conflicting applicable expectations are reported; neither one is chosen.
+D-065 Rechecking is opt-in, bounded, snapshot-fixed; a failure is never confirmation.
+D-066 Findings carry no severity; identifiers derived deterministically.
+D-067 `--evaluate` is additive and changes no exit code.
+D-068 The evaluator is pure; re-execution lives in the execution layer.
+D-069 A versioned JSON artifact stores evidence only, and is Git-ignored.
 
-D-033 was previously superseded by D-037; nothing in this phase supersedes an
-earlier decision. D-030's applicability question was settled by D-036.
+Nothing in this phase supersedes an earlier decision. D-062 relies on the Phase 6A
+fingerprint work; D-060 and D-059 both depend on the D-046 literal whitelist.
 
 ## 6. Requirements and Constraints
 
-- Target code is imported and invoked in exactly one module,
-  `edgehunter.runtime.worker`, and only inside a container.
-- The host scanner, analysis, oracle, generation, pipeline, and execution
-  orchestration never import or execute target code.
-- Docker is the only backend. A missing, unreachable, or non-Linux daemon yields
-  a truthful unavailable report and zero results.
-- No `eval`, `exec`, `literal_eval`, pickle, marshal, or object deserialization.
-- `scan` never executes and its exit codes are unchanged.
-- `run` requires both an explicit target and `--allow-execution`.
-- Exceptions are observations, never findings; no oracle evaluation exists.
-- No Hypothesis, shrinking, adaptive loops, dependency installation, LLM use, or
-  receiver construction.
-- No new runtime dependency was added; `pyproject.toml` still declares only
-  `typer`.
+- Applicability is checked before evaluation, always. An inapplicable oracle is
+  never value-compared.
+- An expectation applies to one exact recorded invocation. No generalization from
+  a single example, however obvious the pattern looks.
+- Non-literal test arguments are never evaluated and the target test is never run.
+- Declared defaults are never evaluated, so `f(1)` and `f(1, 10)` stay distinct.
+- Ambiguous and unresolved expectations are never attached to a target.
+- Host-side evaluation imports no target code, evaluates no target expression, and
+  starts no process.
+- Only built-in values are compared; a `TypeError` from Python is `UNSUPPORTED`,
+  never `MISMATCH`.
+- Identity comparisons are limited to `None`.
+- Custom exception identity from a bare name is `INCONCLUSIVE`.
+- An unverified source snapshot yields no verdict.
+- Infrastructure failures are never oracle violations.
+- Production assertions are never universalized; guard reachability is never
+  inferred and guards are never evaluated.
+- Rechecking requires explicit request, is bounded to 5, reuses one snapshot, and
+  needs `--allow-execution`.
+- No LLM, no Hypothesis, no shrinking, no adaptive search, no severity.
 - All commits are authored solely as PrathamKapoor, with no AI attribution.
 - `paper/`, `research/`, and `*.tex` remain untouched and uncommitted.
 
 ## 7. Testing and Verification
 
-Verified in this session, from a clean tree at the Phase 5 baseline:
+Baseline before changes, with a live Docker Linux daemon:
 
-- baseline before changes: `368 passed`, ruff clean, 53 files formatted, mypy
-  clean in 49 source files
-- final: `557 passed, 1 skipped` (`73.22s`)
-- ruff: `All checks passed!`
-- ruff format: `68 files already formatted`
-- mypy strict: `Success: no issues found in 68 source files`
+- `558 passed, 1 skipped (72.33s)`
 
-Real Docker integration, executed against Docker CLI 29.8.1 / Docker Desktop
-4.93.0 with a Linux daemon (`linux/amd64`), all passing:
+Final, same daemon:
 
-| Case | Expected observation | Result |
+- `741 passed, 1 skipped (228.85s)`
+- ruff check: `All checks passed!`
+- ruff format: `89 files already formatted`
+- mypy strict: `Success: no issues found in 85 source files`
+
+Real Docker integration, executed against Docker CLI 29.8.1 with a Linux daemon
+(`linux/amd64`), all passing. These are the required Phase 6B demonstrations:
+
+| Case | Expected | Result |
 |---|---|---|
-| A ordinary return | `RETURNED`, value matches the arguments | pass |
-| B exception during the call | `RAISED` with `ZeroDivisionError` | pass |
-| C infinite loop | `TIMEOUT` after the 2 s budget | pass |
-| D output flood | `RETURNED`, `stdout_truncated`, ≤16 KiB | pass |
-| E import failure inside the function | `RAISED ModuleNotFoundError` | pass |
-| F import failure at module level | `IMPORT_FAILURE` | pass |
-| G name resolution | `RAISED gaierror`, no network | pass |
-| H import-time write | `IMPORT_FAILURE`, no host file created | pass |
-| cleanup | no `edgehunter-run-*` container survives | pass |
-| native fd write | `os.write(1, ...)` discarded, protocol intact | pass |
+| A matching return expectation | `MATCH`, no finding | pass |
+| B mismatching return expectation | `MISMATCH`, `OBSERVED_EXPECTATION_MISMATCH` | pass |
+| C matching `pytest.raises` | `MATCH`, no finding, `Execution: RAISED` | pass |
+| D missing `pytest.raises` | `MISMATCH` | pass |
+| E no applicable oracle | `INCONCLUSIVE`, no confirmed finding | pass |
+| F three rechecks | `REPRODUCED`, 4/4, no container survives | pass |
+| G unavailable sandbox | no execution, no evaluation, no fallback | pass |
+| H conflicting expectations | `CONFLICTING_EVIDENCE`, both locations kept | pass |
+| provenance | every evaluation names its `path:line` | pass |
+| artifact safety | captured target output absent from the artifact | pass |
+
+Case H is worth noting: `add(0, 0)` genuinely returns `0`, so the observation
+matches one of the two conflicting expectations. The verdict is still
+`CONFLICTING_EVIDENCE`, which is the direct evidence that the evaluator does not
+pick the convenient oracle.
 
 The one skip is `test_symlink_is_refused_and_not_followed`: creating a symlink
-requires Developer Mode or elevation on this Windows host, so the test reports a
-skip instead of passing unverified. The staging code refuses symlinks by
-`is_symlink()` check and the behaviour is otherwise covered.
+requires Developer Mode or elevation on this Windows host. The staging code
+refuses symlinks by `is_symlink()` check and the behaviour is unit-covered
+otherwise; the test reports a skip rather than passing unverified.
 
-Manual verification of the CLI exit contract: no opt-in exits `3` without
-reading the repository, an ambiguous target exits `2` naming both files, and a
-successful run exits `0` with the observation report.
+Manual CLI verification against a real repository with a deliberately wrong
+`add`: the `MISMATCH` output names `test_calculator.py:7`, every other candidate
+reports `ARGUMENTS_DIFFER / NOT_APPLICABLE`, `validate(-1)` reports `MATCH` with
+no finding, and `Bug severity: not assessed` is printed.
 
 ## 8. Known Issues / Risks
 
-- A Docker sandbox reduces risk; it does not eliminate it. Container escapes have
-  existed and a kernel or Docker vulnerability is outside EdgeHunter's control.
-- Files a target creates at run time vanish with the container and are not
-  reported to the host.
-- Targets needing third-party packages are refused rather than installed.
-- Only synchronous, undecorated, top-level functions with fully supported
-  argument values are eligible. Coverage of real codebases is therefore modest,
-  because most parameters remain statically unknown (D-042's conservative
-  interpretation).
+- Docker reduces risk; it does not eliminate it. Container escapes have existed.
+- The nonce-checked result document proves the document belongs to one request. It
+  does **not** prove a deliberately hostile target could not have influenced the
+  worker process that produced it. Strengthening worker/target integrity is a
+  separate future security task.
+- A custom exception matched only by bare name is permanently `INCONCLUSIVE`
+  until a later phase adds qualified exception identity to the protocol.
+- `bool` and `str` parameters still produce no invocation plans, inherited from
+  Phase 5 (D-038's action layer never generated values for them). Those targets
+  are silently unreachable rather than refused, and this is unchanged in Phase 6B.
+- Method receivers are never constructed, so method targets are refused with
+  `NEEDS_RECEIVER`.
+- Framework fixtures are never executed; an expectation using one is reported
+  `UNSUPPORTED`.
+- Production assertion preconditions are not generalized: an `AssertionError` on
+  an invalid-input path is `ASSERTION_OBSERVED`, review required.
+- Guard reachability is not analyzed, so a returning value is never called a guard
+  violation.
+- Arbitrary runtime objects remain opaque, so their comparisons are `UNSUPPORTED`.
+- Symlink refusal is unit-tested but the test skips on this host.
 - A timeout kills the container without explaining what the target was doing.
-- Captured output is truncated and native fd writes are discarded, so the
-  capture is a sample, not a transcript.
-- Symlink refusal is unit-tested but the test skips on this host, so path-through-
-  symlink has not been exercised on this machine.
-- Phase 5's planner emits plans only for parameters with recognizable shapes;
-  `bool` and `str` parameters currently produce no plan, so those targets are
-  silently unreachable rather than refused. This is inherited behaviour, not a
-  Phase 6A change, and is worth a decision.
+- Captured output is truncated and native fd writes are discarded, so the capture
+  is a sample, not a transcript.
 
 ## 9. Unfinished Work
 
-Nothing in the Phase 6A scope is unfinished. Deliberately out of scope:
+Nothing in the Phase 6B scope is unfinished. Deliberately out of scope:
 
-- oracle evaluation of a recorded outcome (Phase 6B and later)
-- failure minimization, deduplication, and reproducible-test emission
-- corpus-scale validation of the eligibility gate against real repositories
+- counterexample search over the deterministic candidate space
+- failure shrinking and minimization
+- adaptive neighborhood search and any learned policy
+- corpus-scale validation against real repositories
 - coverage for `bool` and `str` parameter plans
+- qualified custom-exception identity in the protocol
+- guard reachability analysis
 
 ## 10. Next Subphase
 
-The natural next phase is oracle evaluation: given a recorded `RETURNED` or
-`RAISED` observation, evaluate the mined oracles from the same repository and
-report an explicit contradiction — never a bare "failing test". It should keep
-the existing separation (evaluation happens on the host against decoded data,
-never inside the sandbox) and must not report a bug where the only evidence is
-that an exception occurred. Two smaller items are worth doing first: deciding
-whether `bool`/`str` parameters should produce plans or an explicit refusal, and
-re-running the symlink staging test on an elevated host so it is no longer
-skipped.
+The natural next phase is Phase 7 — counterexample shrinking plus adaptive
+semantic neighborhood search. The prerequisite is now in place: a trustworthy
+execution and evaluation subsystem, so a shrinking step can only ever operate on
+an already-diagnosed contradiction. Two smaller items remain worth doing first,
+and both are honest gaps rather than work in progress:
+
+- decide whether `bool` and `str` parameters should produce plans or an explicit
+  refusal. They are currently silently unreachable, which is the least honest of
+  the current behaviours.
+- add qualified exception identity (module and qualname) to the worker protocol,
+  which would turn the custom-exception `INCONCLUSIVE` cases into decidable
+  matches or mismatches.
+
+Also worth re-running on an elevated host: `test_symlink_is_refused_and_not_followed`,
+so it stops being a skip.
 
 ## 11. Critical Context
 
 - Repo `edgehunter`, branch `main`, remote `origin` -> `PrathamKapoor/Faultline`.
   Published as a public snapshot; do not force-push over it.
 - Python 3.10+; the venv is `.venv`. Run gates as
-  `.venv\Scripts\python.exe -m pytest -q`, `-m ruff check src tests`,
-  `-m ruff format src tests`, `-m mypy`.
-- Docker is available with a Linux backend. The worker image
-  `edgehunter-runtime:1` is built once from `runtime_context()` and cached; a
-  stale image after editing the worker needs `docker image rm edgehunter-runtime:1`.
+  `.venv\Scripts\python.exe -m pytest -q`, `-m ruff check .`,
+  `-m ruff format --check .`, `-m mypy`.
+- Docker must be running. `docker version --format '{{.Server.Os}}'` must print
+  `linux`; the integration tests skip (not pass) when it does not.
+- The worker image `edgehunter-runtime:1` is built once from `runtime_context()`
+  and cached; a stale image after editing the worker needs
+  `docker image rm edgehunter-runtime:1`. Changing `runtime/Dockerfile` requires
+  the image to be rebuilt for integration tests to see the change.
 - The build context is the directory containing the `edgehunter` package, never
-  the scanned repository. Changing `runtime/Dockerfile` requires the image to be
-  rebuilt for integration tests to see the change.
-- The staged module directory is appended to `sys.path`, never prepended, so a
-  staged module cannot shadow a standard-library module.
-- The base image is pinned by digest; do not float it to a tag.
+  the scanned repository.
+- `evaluation/` must stay pure. The safety suite fails if any module in it gains
+  an execution primitive, imports `execution.docker` or the worker, or builds its
+  own literal grammar with `ast.parse`/`json.loads`.
+- `pipeline.py` must not import `evaluation`. A safety test asserts it, because
+  the static scan path has to stay static.
 - `check_relative_path` must keep both the POSIX and Windows readings. Removing
   either reintroduces a real escape.
-- `run` deliberately never exits `1`. Do not "fix" that.
-- `run_docker` must keep file-backed capture. Reverting to `capture_output=True`
-  reintroduces unbounded host memory growth.
-- The worker's `_BoundedStream` must keep discarding excess as it is written;
-  clipping after the call was the original defect.
-- `pyproject.toml` `package-data` must keep `edgehunter = ["runtime/Dockerfile"]`,
-  or an installed distribution cannot build the worker.
-- `mypy` runs over `src` and `tests` in strict mode, which is why the worker is
-  type-checked despite being container-only code.
+- `run` deliberately never exits `1`, and `--evaluate` does not change that.
+- Every `docker run` hardening argument in `execution/docker.py` must stay. Do not
+  enable network access or a host fallback to make evaluation easier.
+- The evaluator compares decoded protocol values. If a comparison appears to need
+  a target object, the answer is `UNSUPPORTED`, not a host-side comparison.
+- `mypy` runs over `src` and `tests` in strict mode.
+- `.edgehunter/` is Git-ignored; never commit a generated evaluation artifact.
 
 ## 12. Agent Instructions
 
@@ -250,9 +287,16 @@ skipped.
 - Append decisions in the established format. Every bug fix needs `Symptom`,
   `Root cause`, and `Regression test`. Mark superseded decisions explicitly.
 - Update `flow.md` with real module, function, and file names as the code changes.
-- Never weaken an isolation property to make a test pass. A failing refusal
-  test is a finding about the code, not about the test.
-- Never make a run report a defect. `RAISED` is an observation.
+- The central rule of this project is that an observation is not a judgement. If
+  a change makes an exception look more like a bug without adding evidence, it is
+  wrong.
+- Never report an exception as a finding on its own. Never convert a structural
+  risk score into severity. Never add a severity field.
+- Never weaken an isolation property to make a test pass. A failing refusal test
+  is a finding about the code, not about the test.
+- Prefer `INCONCLUSIVE`, `UNSUPPORTED`, or `NOT_APPLICABLE` over a verdict the
+  evidence does not support. A small number of well-evidenced counterexamples is
+  the entire point of this project.
 - Verify with evidence before claiming completion: run the gates, read the
   output, and quote the numbers.
 - Commit as PrathamKapoor only. No AI attribution in commits, branches, tags,

@@ -13,6 +13,8 @@ from typing import Annotated
 import typer
 
 from edgehunter import __version__
+from edgehunter.evaluation.models import EvaluationReport, ReproductionStatus
+from edgehunter.evaluation.repository import HARD_MAX_RECHECKS, evaluate_run, target_functions
 from edgehunter.execution.models import RunReport
 from edgehunter.execution.repository import (
     ExecutionRefused,
@@ -29,6 +31,7 @@ from edgehunter.oracle.models import (
 )
 from edgehunter.pipeline import RepositoryScan, analyze_repository
 from edgehunter.scanner import RepositoryAnalysis, ScanError
+from edgehunter.scanner.models import FunctionInfo
 
 EXIT_SCAN_ISSUES = 1
 EXIT_INVALID_INPUT = 2
@@ -98,6 +101,26 @@ def run(
         float,
         typer.Option("--timeout", help="Per-invocation wall-clock budget in seconds."),
     ] = 3.0,
+    evaluate: Annotated[
+        bool,
+        typer.Option(
+            "--evaluate",
+            help=(
+                "Compare each observation against the explicit expectations the repository "
+                "itself records for that exact invocation."
+            ),
+        ),
+    ] = False,
+    recheck: Annotated[
+        int,
+        typer.Option(
+            "--recheck",
+            help=(
+                "Re-execute each candidate this many extra times to test whether a "
+                "contradiction reproduces. Bounded; never automatic. Requires --evaluate."
+            ),
+        ),
+    ] = 0,
 ) -> None:
     """Execute selected candidate inputs for ONE target inside a Docker sandbox.
 
@@ -108,8 +131,11 @@ def run(
     network, a read-only root filesystem, dropped privileges, and bounded
     time/memory/process limits. If Docker cannot be used, nothing is executed.
 
-    This command reports what happened. It does **not** judge whether any outcome
-    is a bug: an exception is an observation, not a finding.
+    Without ``--evaluate`` this command only reports what happened. With
+    ``--evaluate`` it also checks each observation against the repository's own
+    explicit expectations for that exact input, and reports a contradiction when
+    one is genuinely contradicted. An exception on its own is never a finding, and
+    no severity is assigned.
     """
     if not allow_execution:
         typer.secho(
@@ -129,6 +155,38 @@ def run(
     if resolved is None:
         typer.secho(f"error: {target_error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=EXIT_INVALID_INPUT)
+
+    evaluation: tuple[EvaluationReport, ...] = ()
+    if evaluate:
+        requested = _bounded_recheck(recheck)
+        try:
+            report = execute_target(
+                analysis,
+                path if path.is_dir() else path.parent,
+                RunOptions(
+                    target=resolved,
+                    max_cases=max_cases,
+                    timeout_seconds=timeout,
+                    rechecks=requested,
+                ),
+                authorized=True,
+                repository_context=runtime_context(),
+            )
+        except ExecutionRefused as exc:
+            typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=EXIT_EXECUTION_REFUSED) from exc
+
+        _print_execution(report, evaluate=evaluate)
+        evaluation = evaluate_run(
+            report,
+            scan=analysis,
+            functions=_target_functions(analysis, report),
+            requested_rechecks=requested,
+        )
+        _print_evaluation(evaluation)
+        if not report.executed_count:
+            raise typer.Exit(code=EXIT_EXECUTION_REFUSED)
+        return
 
     try:
         report = execute_target(
@@ -190,15 +248,147 @@ def _resolve_target(analysis: RepositoryScan, spec: str) -> tuple[str | None, st
     return (f"{file_hint}::{qualified}" if file_hint else qualified), None
 
 
-def _print_execution(report: RunReport) -> None:
+def _bounded_recheck(requested: int) -> int:
+    """Clamp the recheck count, refusing a negative request outright."""
+    if requested < 0:
+        typer.secho("error: --recheck must be zero or greater", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_INVALID_INPUT)
+    return min(requested, HARD_MAX_RECHECKS)
+
+
+def _target_functions(analysis: RepositoryScan, report: RunReport) -> dict[str, FunctionInfo]:
+    """The analyzed function behind each executed target, looked up by identity.
+
+    Reads the single parse the scan already performed. No module is re-read and no
+    source is re-parsed here.
+    """
+    functions: dict[str, FunctionInfo] = {}
+    for result in report.results:
+        if result.target.qualified_name in functions:
+            continue
+        function = target_functions(analysis, result.target.identity)
+        if function is not None:
+            functions[result.target.qualified_name] = function
+    return functions
+
+
+def _print_evaluation(reports: tuple[EvaluationReport, ...]) -> None:
+    """Print the oracle evaluation for every executed candidate.
+
+    Output never says a bug was confirmed. A contradiction is described as a
+    contradiction with one explicit expectation, and bug severity is explicitly
+    reported as not assessed, because nothing here is calibrated.
+    """
+    typer.echo("EdgeHunter — Oracle Evaluation")
+    typer.echo("")
+
+    for report in reports:
+        _print_evaluation_report(report)
+
+    typer.echo("  Bug severity: not assessed")
+    typer.echo("  (an expectation mismatch is evidence of disagreement with one explicit")
+    typer.echo("   expectation; it is not by itself a confirmed software defect)")
+    typer.echo("")
+
+
+def _print_evaluation_report(report: EvaluationReport) -> None:
+    primary = report.primary
+    typer.echo(f"  Target: {report.target_identity}")
+    typer.echo(f"  Execution: {report.execution_outcome.value.upper()}")
+    if report.source_digest is not None:
+        typer.echo(f"  Source snapshot: {report.source_digest[:12]} (verified)")
+    else:
+        typer.echo("  Source snapshot: not verified")
+
+    if primary is None:
+        typer.echo("  Applicable oracle: none")
+        typer.echo("  Evaluation: INCONCLUSIVE")
+        typer.echo("  Finding: None")
+        typer.echo("")
+        return
+
+    typer.echo(f"  Invoked: {_invocation_text(report)}")
+    typer.echo(f"  Observed: {primary.observed_description or '(not described)'}")
+    typer.echo(f"  Oracle: {primary.oracle.value.replace('_', ' ')}")
+    typer.echo(f"  Expected: {primary.expected_description or '(none recorded)'}")
+    typer.echo(f"  Evidence: {primary.describe_location()}")
+    typer.echo(f"  Applicability: {primary.applicability_kind.value.upper()}")
+    typer.echo(f"  Evaluation: {primary.status.value.upper()}")
+
+    if len(report.executions) > 1:
+        typer.echo("  All applicable oracles:")
+        for entry in report.executions:
+            location = entry.describe_location()
+            typer.echo(f"    {entry.status.value.upper():<22} {location}")
+            typer.echo(f"      {entry.reason}")
+
+    _print_reproduction(report)
+    _print_findings(report)
+    typer.echo("")
+
+
+def _invocation_text(report: EvaluationReport) -> str:
+    """The exact call that was executed, in canonical parameter bindings."""
+    if report.invocation is None:
+        return "(no invocation recorded)"
+    return report.invocation.render()
+
+
+def _print_reproduction(report: EvaluationReport) -> None:
+    summary = report.reproduction
+    if summary.status is ReproductionStatus.NOT_RECHECKED:
+        typer.echo("  Reproduction: Not rechecked")
+        return
+    if summary.status is ReproductionStatus.REPRODUCED:
+        typer.echo(
+            f"  Reproduction: {summary.equivalent_mismatches} / {summary.attempts} "
+            "equivalent mismatches"
+        )
+        return
+    if summary.status is ReproductionStatus.FLAKY:
+        typer.echo(
+            f"  Reproduction: FLAKY ({summary.equivalent_mismatches} of {summary.attempts} "
+            "attempts agreed; the behaviour is not stable and is not reported as a defect)"
+        )
+        return
+    typer.echo(
+        f"  Reproduction: RECHECK_FAILED ({summary.failures} of {summary.attempts} attempts "
+        "could not be evaluated; an environment failure is not confirmation)"
+    )
+
+
+def _print_findings(report: EvaluationReport) -> None:
+    if not report.findings:
+        typer.echo("  Finding: None")
+        return
+    for finding in report.findings:
+        typer.echo(f"  Finding: {finding.kind.value.replace('_', ' ').title()}")
+        typer.echo(f"    id: {finding.finding_id}")
+        typer.echo(f"    oracle: {finding.oracle_location}")
+        typer.echo(f"    expected: {finding.expected_behavior}")
+        typer.echo(f"    observed: {finding.observed_behavior}")
+        if finding.primary_action:
+            typer.echo(f"    action: {finding.primary_action}")
+        for provenance in finding.assignment_provenance:
+            typer.echo(f"      {provenance}")
+        if finding.reproduction_command:
+            typer.echo(f"    reproduce: {finding.reproduction_command}")
+        typer.echo(f"    detail: {finding.detail}")
+
+
+def _print_execution(report: RunReport, *, evaluate: bool = False) -> None:
     """Print one structured report; no outcome is described as a defect."""
     typer.echo("EdgeHunter execution")
     typer.echo("")
     typer.echo(f"  Sandbox: {report.sandbox.backend} ({report.sandbox.state.value})")
     if report.sandbox.detail:
         typer.echo(f"  {report.sandbox.detail}")
-    typer.echo("  Oracle evaluation: not performed")
-    typer.echo("  Finding: none (this phase only observes)")
+    if evaluate:
+        typer.echo("  Oracle evaluation: requested; reported below")
+        typer.echo("  Finding: reported by the oracle evaluation below")
+    else:
+        typer.echo("  Oracle evaluation: not performed")
+        typer.echo("  Finding: none (this phase only observes)")
     typer.echo("")
 
     if not report.sandbox.is_usable:

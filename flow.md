@@ -516,3 +516,197 @@ flowchart TD
 | CLI | Added `run` with `--target`, `--allow-execution`, `--max-cases`, `--timeout`; ambiguous or unknown targets exit 2; exit 1 is unused by `run` | src/edgehunter/cli.py | 89865f7 | D-052, D-057 |
 | tests | Added codec, assembly, eligibility, staging, docker-argument, worker-protocol, boundary, CLI, and real-Docker integration suites; registered the `integration` marker | tests/test_execution_*.py, pyproject.toml | 89865f7 | D-045 to D-057 |
 | docs | Recorded D-045 to D-057 including three defect fixes with symptom, root cause, and regression test | decisions.md, flow.md | 89865f7 | D-046 to D-057 |
+
+## 18. Oracle evaluation rules (`src/edgehunter/evaluation/`)
+
+`run --evaluate` is the only path that judges an observation. It runs entirely on
+the host, after the container is gone, over data the protocol already decoded.
+
+### 18.1 Applicability runs before evaluation
+
+```text
+TestExpectationCandidate  +  InvocationSignature  +  BoundCall
+        │                          │                    │
+        └──────────────────────────┴────────────────────┘
+                            check_applicability()      applicability.py
+```
+
+Applicability requires all four of:
+
+- the expectation resolved to exactly one target, and it is the executed target
+- every recorded argument is literal syntax (no fixture, name, or constructor)
+- no `*args` / `**kwargs`
+- the same arguments bound to the same parameter names through the signature
+
+Both sides become a `BoundCall` of canonical `(parameter, value text)` pairs, so
+the comparison is structural and never touches a user-defined `__eq__`.
+
+```text
+add(1, 2)      and add(a=1, b=2)   ──► same bindings ──► APPLICABLE
+add(1, 2)      and add(0, 2)       ──► ARGUMENTS_DIFFER ──► NOT_APPLICABLE
+add(fixture, 2)                    ──► ARGUMENTS_NOT_LITERAL ──► UNSUPPORTED
+parse("x") with two `parse`s       ──► AMBIGUOUS_TARGET ──► INCONCLUSIVE
+f(1)           and f(1, 10)       ──► ARGUMENTS_DIFFER (defaults never evaluated)
+```
+
+### 18.2 Statuses
+
+| Status | Raised when |
+|---|---|
+| `MATCH` | An applicable oracle was evaluated and the observation satisfied it. |
+| `MISMATCH` | An applicable oracle was evaluated and the observation contradicted it. |
+| `NOT_APPLICABLE` | The oracle does not cover this target, input, or invocation. |
+| `INCONCLUSIVE` | Timeout, import failure, unavailable sandbox, ambiguous expectation, or unverified source snapshot. |
+| `UNSUPPORTED` | The comparison or runtime feature is outside what this phase supports. |
+| `CONFLICTING_EVIDENCE` | Applicable expectations disagree; both locations retained, no defect claimed. |
+
+Execution status is a separate dimension and is never rewritten:
+
+```text
+Execution: RAISED    Oracle: MATCH   ← normal; this is what pytest.raises verifies
+Execution: RETURNED  Oracle: MISMATCH ← normal; the test expected an exception
+Execution: RAISED    Oracle: INCONCLUSIVE ← infrastructure failure, not a violation
+```
+
+### 18.3 Evaluation call tree
+
+```text
+evaluate_run()                                    repository.py
+ ├─ target_functions(scan, identity)              repository.py  — reuses the single parse
+ ├─ SourceSnapshot.verify(analyzed, digests, path) repository.py — SHA-256 equality
+ ├─ summarize_attempts((first, *rechecks))        repository.py
+ │   └─ _attempt_status(...)                      evaluator.py
+ │       ├─ evaluate_observation(...)             evaluator.py
+ │       │   ├─ expectations_for_target(...)      applicability.py — indexed by target
+ │       │   └─ evaluate_oracle(...)              evaluator.py
+ │       │       ├─ check_applicability(...)      applicability.py  FIRST, always
+ │       │       │   └─ bind_recorded_call(...)   applicability.py  — literal recognition only
+ │       │       ├─ _evaluate_raises(...)         evaluator.py
+ │       │       │   └─ match_exception(...)      exceptions.py      — builtin hierarchy
+ │       │       └─ _evaluate_returns(...)        evaluator.py
+ │       │           ├─ _compare(...)             evaluator.py
+ │       │           │   ├─ recognize_literal(...) codec.py           — AST whitelist
+ │       │           │   ├─ materialize(...)      values.py           — built-ins only
+ │       │           │   └─ compare_typed_values() compare.py          — Python's operators
+ │       │           └─ canonical_value_text(...) values.py           — NaN / -0.0 safe
+ │       │       └─ reconcile(evaluated)          evaluator.py       — conflicts, not a pick
+ │       └─ observation_key(result)                evaluator.py       — identity, not equality
+ └─ build_evaluation_report(...)                   repository.py
+     ├─ assertion_observed(...)                    evaluator.py       — ASSERTION_OBSERVED
+     ├─ guard_evidence(...)                        evaluator.py       — context only, never evaluated
+     ├─ reconcile(...)                             evaluator.py
+     └─ build_findings(...)                        findings.py
+         └─ deduplicate_findings(...)              findings.py       — deterministic key
+```
+
+### 18.4 Comparison rules
+
+- `==`, `!=`, `<`, `<=`, `>`, `>=` apply **Python's own** operator semantics, so
+  `True == 1` is satisfied by an integer `1` and an existing passing test is never
+  reported as a mismatch.
+- A comparison Python itself refuses with `TypeError` is `UNSUPPORTED`, never
+  `MISMATCH`.
+- `is` / `is not` are supported only against `None`. Identity between arbitrary
+  values is not observable, and `==` is not a substitute.
+- Only built-ins are ever materialized. A return the codec could not represent is
+  `opaque_return`, and the verdict is `UNSUPPORTED`.
+- Observation identity is canonical **text**: outcome kind plus typed value (or
+  exception class). Durations, execution ids, container ids, and temporary paths
+  are excluded. `NaN` and `-0.0` get distinct descriptors.
+
+### 18.5 Source snapshot verification
+
+```text
+ModuleAnalysis.digest          (SHA-256 during the single read)
+        ==                    equal?
+StagedSource.digests[path]     (SHA-256 of the bytes actually written)
+        │
+        ├── equal ──► verified, evaluation proceeds
+        └── differ / missing ──► INCONCLUSIVE
+                "source snapshot not verified"
+```
+
+No Git commit hash is used: a target repository may not be a repository. Digests
+are captured into `RunReport.staged_digests` before the temporary tree is deleted,
+so verification survives cleanup.
+
+### 18.6 Reproduction
+
+```text
+--recheck N        opt-in, clamped to HARD_MAX_RECHECKS = 5
+                    total containers per plan ≤ 6
+
+every attempt ──► same staged snapshot, new nonce, new execution id
+
+attempts:    verdict sequence              → ReproductionStatus
+             M,M,M                        → REPRODUCED
+             M,X,M                        → FLAKY
+             M, INCONCLUSIVE (sandbox)    → RECHECK_FAILED
+             single attempt, no request   → NOT_RECHECKED
+```
+
+An attempt that could not run is a failure, never confirmation. Attempts are
+compared by `observation_key()`, never by raw document equality.
+
+### 18.7 Findings
+
+```text
+FindingKind:  OBSERVED_EXPECTATION_MISMATCH    one execution contradicted one expectation
+              REPRODUCED_EXPECTATION_MISMATCH every requested attempt agreed
+              ASSERTION_OBSERVED              a production assertion fired; review required
+              SUSPICIOUS_BEHAVIOR              interesting, with no applicable oracle
+              INCONCLUSIVE                    conflicting or undecidable
+
+no MATCH finding        no UNSUPPORTED finding        no severity field at all
+```
+
+Identifiers are `ehf-` + 12 hex of SHA-256 over target identity, source
+fingerprint, oracle location, invocation, and category. Deduplication uses the same
+key, so the same exception on a different target, input, oracle, or snapshot stays a
+distinct finding.
+
+### 18.8 What is never inferred
+
+- Production assertions are not universal input contracts.
+- Guard reachability is not inferred; guards are context only.
+- Returning normally proves nothing about assertions inside the function.
+- Ambiguous or unresolved test callees are never attached to a target.
+- Non-literal test arguments are never evaluated, and the test is never run.
+- Declared defaults are never evaluated, so `f(1)` and `f(1, 10)` stay distinct.
+- Custom exception identity from a bare name is `INCONCLUSIVE`.
+- Structural risk scores are never converted into severity.
+
+### 18.9 Artifact
+
+```text
+.edgehunter/runs/<run-id>/evaluation.json
+  schema_version, per report:
+    target_identity, source_digest, execution_outcome
+    reproduction {status, attempts, equivalent_mismatches, failures}
+    executions[] {oracle, applicability, status, reason, expected, observed, evidence[]}
+    findings[]   {id, kind, expected, observed, reproduction, detail}
+
+captured target output and exception messages are deliberately excluded
+.edgehunter/ is Git-ignored
+```
+
+## Changes in this session (Phase 6B - Runtime Oracle Evaluation)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| evaluation | Added the `evaluation` package with the six-status `OracleStatus` vocabulary, finding kinds, reproduction status, and provenance records | src/edgehunter/evaluation/__init__.py, src/edgehunter/evaluation/models.py | uncommitted | D-058, D-066 |
+| evaluation | Added exact applicability: same target, all-literal arguments, no starred args, same signature-bound parameter values, structural `BoundCall` comparison | src/edgehunter/evaluation/applicability.py | uncommitted | D-059 |
+| evaluation | Added safe comparison over decoded protocol values using Python's own operator semantics, with identity limited to `None` and `TypeError` becoming `UNSUPPORTED` | src/edgehunter/evaluation/compare.py | uncommitted | D-060 |
+| evaluation | Added built-in exception hierarchy matching derived from `builtins.__mro__`, with custom exception identity reported inconclusive rather than guessed | src/edgehunter/evaluation/exceptions.py | uncommitted | D-061 |
+| evaluation | Added materialization and canonical identity text so `NaN` and `-0.0` stay distinguishable during dedup and recheck comparison | src/edgehunter/evaluation/values.py | uncommitted | D-060 |
+| evaluation | Added the evaluator: applicability first, then verdict; infrastructure failures always inconclusive; conflicting expectations reconciled, never picked | src/edgehunter/evaluation/evaluator.py | uncommitted | D-058, D-063, D-064 |
+| evaluation | Added finding classification with no severity field, deterministic hashed identifiers, and deterministic deduplication | src/edgehunter/evaluation/findings.py | uncommitted | D-066 |
+| evaluation | Added snapshot verification via SHA-256 comparison, per-attempt reproduction summaries, and a versioned JSON artifact that excludes target output | src/edgehunter/evaluation/repository.py | uncommitted | D-062, D-065, D-069 |
+| evaluation | Added attempt-sequence bookkeeping separating usable attempts from infrastructure failures | src/edgehunter/evaluation/recheck.py | uncommitted | D-065 |
+| oracle | Wired the mined call shape into the expectation record so positional counts, keyword arguments, and starred arguments are available for exact matching | src/edgehunter/oracle/test_expectations.py | uncommitted | D-059 |
+| execution | `RunOptions` gained a clamped `rechecks` field; `RunReport` gained the recheck mapping and the staged digests captured before cleanup | src/edgehunter/execution/repository.py, src/edgehunter/execution/models.py | uncommitted | D-062, D-065 |
+| CLI | `run` gained `--evaluate` and `--recheck`, plus the evaluation report; exit codes unchanged and `scan` unchanged | src/edgehunter/cli.py | uncommitted | D-067 |
+| tests | Added applicability, verdict, findings, safety, CLI, and real-Docker integration suites | tests/test_evaluation_applicability.py, tests/test_evaluation_verify.py, tests/test_evaluation_findings.py, tests/test_evaluation_safety.py, tests/test_evaluation_cli.py, tests/test_evaluation_integration.py | uncommitted | D-058..D-069 |
+| docs | Added D-058 through D-069 and this flow section | decisions.md, flow.md | uncommitted | none |
+| docs | Documented `--evaluate`, the status table, reproduction, deliberate non-inferences, and the worker-trust limitation | README.md | uncommitted | none |
+| config | Added `.edgehunter/` to `.gitignore` so generated evaluation artifacts can never be committed | .gitignore | uncommitted | D-069 |

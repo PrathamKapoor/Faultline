@@ -10,7 +10,7 @@ mistaken for a discovered defect.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -265,6 +265,19 @@ class RunReport:
     results: tuple[ExecutionResult, ...]
     sandbox: SandboxStatus
     skipped: tuple[ExecutionEligibility, ...]
+    rechecks: dict[str, tuple[ExecutionResult, ...]] = field(default_factory=dict)
+    """Additional attempts per action id, present only when rechecks were requested.
+
+    Keyed by ``ExecutionResult.action_id`` so an attempt is always attached to the
+    plan that produced it. Empty by default: nothing retries automatically.
+    """
+
+    staged_digests: tuple[tuple[str, str], ...] = ()
+    """``(relative POSIX path, SHA-256)`` for the staged copy, captured before deletion.
+
+    Retained so oracle evaluation can verify that the executed revision matches the
+    analyzed one after the temporary tree has been removed.
+    """
 
     @property
     def executed_count(self) -> int:

@@ -99,6 +99,7 @@ def _expectation(
     expected: ast.expr,
 ) -> TestExpectationCandidate:
     call_text = render_source(call)
+    shape = _call_shape(call)
     return TestExpectationCandidate(
         kind=PropertyKind.EXAMPLE_EXPECTATION,
         strength=OracleStrength.STRONG,
@@ -107,8 +108,12 @@ def _expectation(
         call_expression=call_text,
         comparison_operator=operator,
         expected_expression=render_source(expected),
-        literal_arguments=tuple(text for text, _ in _literal_arguments(call)),
-        argument_positions=tuple(position for _, position in _literal_arguments(call)),
+        literal_arguments=shape.literal_arguments,
+        argument_positions=shape.argument_positions,
+        positional_argument_count=shape.positional_argument_count,
+        keyword_arguments=shape.keyword_arguments,
+        keyword_argument_count=shape.keyword_argument_count,
+        starred_arguments=shape.starred_arguments,
         evidence=(
             OracleEvidence(
                 kind=OracleEvidenceKind.TEST_ASSERTION,
@@ -237,6 +242,7 @@ def _raises_expectations(
 
     exception = _pytest_raises_argument(call)
     call_text = render_source(body_call)
+    shape = _call_shape(body_call)
     return [
         TestExpectationCandidate(
             kind=PropertyKind.EXAMPLE_RAISES,
@@ -245,8 +251,12 @@ def _raises_expectations(
             callee=_callee_name(body_call),
             call_expression=call_text,
             exception=exception,
-            literal_arguments=tuple(text for text, _ in _literal_arguments(body_call)),
-            argument_positions=tuple(position for _, position in _literal_arguments(body_call)),
+            literal_arguments=shape.literal_arguments,
+            argument_positions=shape.argument_positions,
+            positional_argument_count=shape.positional_argument_count,
+            keyword_arguments=shape.keyword_arguments,
+            keyword_argument_count=shape.keyword_argument_count,
+            starred_arguments=shape.starred_arguments,
             evidence=(
                 OracleEvidence(
                     kind=OracleEvidenceKind.TEST_RAISES,

@@ -43,8 +43,9 @@ straightforward code.
 
 **Early development. Structure, semantics, boundaries, structural risk ranking,
 explicit oracle mining, static annotation shapes, safe baseline synthesis,
-invocation planning, strategy planning, and an isolated Docker execution backend
-are implemented; the counterexample search engine is not.**
+invocation planning, strategy planning, an isolated Docker execution backend, and
+runtime oracle evaluation are implemented; the counterexample search engine is
+not.**
 
 What exists today:
 
@@ -109,6 +110,29 @@ What exists today:
 - bounded output capture on both sides of the boundary: the worker keeps 16 KiB
   of Python-level output and discards the rest as it is written, and host-side
   Docker output is read through a 64 KiB cap
+- runtime oracle evaluation behind `run --evaluate`: each observation is checked
+  against the explicit expectations the repository itself records for that exact
+  invocation, with a six-value status vocabulary (`MATCH`, `MISMATCH`,
+  `NOT_APPLICABLE`, `INCONCLUSIVE`, `UNSUPPORTED`, `CONFLICTING_EVIDENCE`) where
+  no status is a synonym for another
+- exact applicability: an expectation applies only to the same target with the same
+  arguments bound through the target's own signature, so `assert add(0, 0) == 0`
+  says nothing about `add(1, 0)` and is never generalized into a contract
+- safe result comparison that applies Python's own operator semantics (so
+  `True == 1` still holds), supports `==`, `!=`, `<`, `<=`, `>`, `>=`, and
+  identity against `None` only, and reports `UNSUPPORTED` rather than `MISMATCH`
+  whenever Python itself refuses a comparison
+- expected-exception verification including the real builtin exception hierarchy,
+  with custom exception identity reported `INCONCLUSIVE` rather than guessed
+- source-snapshot verification: the SHA-256 of the analyzed bytes is compared with
+  the bytes that were staged and executed, and an unverifiable snapshot produces no
+  verdict
+- optional bounded re-execution (`--recheck N`, hard maximum 5) that reuses the
+  same staged snapshot, distinguishes `REPRODUCED` from `FLAKY` and
+  `RECHECK_FAILED`, and never treats an environment failure as confirmation
+- deterministic, evidence-backed findings that keep every source location and
+  report a contradiction as a contradiction — never as a confirmed defect, a
+  vulnerability, or a severity
 
 Safety: `scan` analyzes code and never imports or executes it, including tests.
 The scanner reads text and parses it; nothing else. Annotations are interpreted
@@ -130,20 +154,29 @@ deserialize an object. There is no fallback: if Docker is missing or unusable,
 the report says so and nothing runs.
 
 What does **not** exist yet: risk calibration, property inference from
-docstrings or metamorphic relations, executable test generation, oracle
-evaluation, counterexamples, failure shrinking, and any model-based search.
+docstrings or metamorphic relations, executable test generation, counterexample
+search, failure shrinking, and any model-based search.
 Three things are deliberately *not* claimed here: a boundary candidate
 is not a bug, mined oracle evidence is not a defect — it is an explicit
-expectation a later execution stage can check — and neither a candidate case nor
-an invocation plan is a reproducing input until something actually runs it. A
-baseline value is not a validity claim: `0` is the simplest statically
-constructible integer, not a "valid" one.
+expectation that a later stage can check against an observation — and neither a
+candidate case nor an invocation plan is a reproducing input until something
+actually runs it. A baseline value is not a validity claim: `0` is the simplest
+statically constructible integer, not a "valid" one.
 
 **A recorded outcome is not a finding.** `edgehunter run` reports `RETURNED`,
 `RAISED`, `TIMEOUT`, `IMPORT_FAILURE`, `TARGET_NOT_FOUND`, `PROTOCOL_ERROR`, and
-`WORKER_FAILURE`. Phase 6A performs no oracle evaluation, so an exception
-observed during a run is a fact about that run, not a defect claim. The report
+`WORKER_FAILURE`. Without `--evaluate` nothing is judged at all: an exception
+observed during a run is a fact about that run, not a defect claim, and the report
 states this explicitly.
+
+**A mismatch is still not a confirmed bug.** With `--evaluate`, EdgeHunter reports
+a contradiction between one explicit, applicable expectation and one observed
+behaviour. That is real evidence, and it is the narrowest claim that is true. It
+is not a diagnosis: the expectation itself may be outdated, the assertion may
+express a precondition rather than a contract, and a runtime observation may be
+unstable. Bug severity and impact are not assessed in this phase, and structural
+risk scores are search-priority heuristics rather than severity (see
+[Current status](#current-status)).
 
 ### Known limitation: annotation interpretation is syntactic
 
@@ -185,8 +218,18 @@ What this does **not** claim:
 - A timeout kills the container; it does not explain what the target was doing.
 - Captured output is bounded and truncated, so it is a sample, not a transcript.
   Native writes to file descriptors 1 and 2 are discarded entirely.
-- A `RAISED` outcome is an observation. Phase 6A does not compare the result
+- A `RAISED` outcome is an observation. Without `--evaluate` nothing is compared
   against any oracle, so it cannot and does not report a bug.
+
+### Known limitation: worker output is an observation, not cryptographic proof
+
+Phase 6B adds a nonce-checked result document, which proves the document belongs to
+one request. It does **not** prove a deliberately hostile target could not have
+influenced the worker process that produced it: target code runs inside that
+process, so a determined target could in principle interfere with process state.
+The isolation model reduces this risk; it does not eliminate it. Strengthening
+worker/target integrity is a separate future security task and is not addressed
+here.
 
 ## Installation
 
@@ -669,7 +712,198 @@ Exit codes for `run`:
 ```
 
 Exit code `1` is deliberately unused by `run`, so a script can tell "the scan
-found something" from "the run did not happen".
+found something" from "the run did not happen". Oracle evaluation does not change
+these codes: a contradiction is reported in the output, never as an exit status.
+
+### Evaluating an observation against the repository's own expectations
+
+`--evaluate` compares each observation against the explicit expectations the
+repository itself records for that *exact* invocation:
+
+```console
+$ edgehunter run ./example --target 'calculator.py::add' --allow-execution --evaluate --max-cases 10
+EdgeHunter execution
+
+  Sandbox: docker (ready)
+  trusted worker image available
+  Oracle evaluation: requested; reported below
+  Finding: reported by the oracle evaluation below
+
+  Target: calculator.py::add
+  Action: add:a:set_zero:
+    Arguments:
+      a = 0  [adversarial_action]
+      b = 0  [existing_test_baseline]
+  Outcome: RETURNED
+  Returned:  1
+  Duration:  0.040s
+
+EdgeHunter — Oracle Evaluation
+
+  Target: calculator.py::add
+  Execution: RETURNED
+  Source snapshot: 9494df6065f3 (verified)
+  Invoked: calculator.py::add(a=integer:0, b=integer:0)
+  Observed: 1 (integer)
+  Oracle: test assertion
+  Expected: add(0, 0) == 0
+  Evidence: test_calculator.py:5
+  Applicability: EXACT_MATCH
+  Evaluation: MISMATCH
+  Reproduction: Not rechecked
+  Finding: Observed Expectation Mismatch
+    id: ehf-1ef04beafc33
+    oracle: test_calculator.py:5
+    expected: add(0, 0) == 0
+    observed: 1 (integer)
+    action: add:a:set_zero:
+      a=0 [adversarial_action]
+      b=0 [existing_test_baseline]
+    reproduce: edgehunter run . --target 'calculator.py::add' --allow-execution --evaluate --recheck 3
+    detail: expected add(0, 0) == 0; observed integer:1
+
+  Bug severity: not assessed
+  (an expectation mismatch is evidence of disagreement with one explicit
+   expectation; it is not by itself a confirmed software defect)
+```
+
+Given this deliberately wrong target:
+
+```python
+# calculator.py
+def add(a: int, b: int) -> int:
+    return a + b + 1
+```
+
+```python
+# test_calculator.py
+def test_add():
+    assert add(0, 0) == 0
+```
+
+only `add(0, 0)` is contradicted. Every other candidate is `NOT_APPLICABLE`:
+
+```console
+  Applicability: ARGUMENTS_DIFFER
+  Evaluation: NOT_APPLICABLE
+  Finding: None
+```
+
+**An expectation applies to one recorded example and nothing else.**
+`assert add(1, 2) == 3` is never treated as `add(a, b) == a + b`, and
+`assert square(2) == 4` implies nothing about `square(3)`.
+
+An expected exception is verified the same way, and a raise that *satisfies* the
+test produces no finding at all:
+
+```console
+  Target: calculator.py::validate
+  Execution: RAISED
+  Invoked: calculator.py::validate(x=integer:-1)
+  Observed: raised ValueError
+  Oracle: test raises
+  Expected: validate(-1) raises ValueError
+  Evidence: test_validate.py:12
+  Applicability: EXACT_MATCH
+  Evaluation: MATCH
+  Finding: None
+```
+
+`Execution: RAISED` with `Evaluation: MATCH` is a normal, expected outcome. An
+exception is only ever a finding when it contradicts an applicable expectation.
+
+Executing an interesting case without knowing whether the behaviour is correct is
+also a supported result:
+
+```console
+  Target: math_ops.py::divide
+  Execution: RAISED
+  Applicable oracle: none
+  Evaluation: INCONCLUSIVE
+  Finding: None
+```
+
+Two tests disagreeing about one invocation is a fact about the repository, not
+about the code:
+
+```console
+  Evaluation: CONFLICTING_EVIDENCE
+  Finding: Inconclusive
+```
+
+#### Oracle statuses
+
+| Status | Meaning |
+|---|---|
+| `MATCH` | An applicable oracle was evaluated and the observation satisfied it. |
+| `MISMATCH` | An applicable oracle was evaluated and the observation contradicted it. |
+| `NOT_APPLICABLE` | The oracle does not cover this target, input, or invocation. |
+| `INCONCLUSIVE` | Not enough evidence: a timeout, an import failure, an unavailable sandbox, an ambiguous expectation, or an unverified source snapshot. |
+| `UNSUPPORTED` | The comparison or runtime feature is outside what this phase supports. Never reported as a mismatch. |
+| `CONFLICTING_EVIDENCE` | Applicable expectations disagree with each other. Both locations are retained and no defect is claimed. |
+
+#### Reproducing a contradiction
+
+`--recheck N` re-executes each candidate up to `N` extra times (hard maximum 5),
+inside the same Docker backend, against the same staged source snapshot. Nothing
+retries automatically and no flag combination bypasses `--allow-execution`:
+
+```console
+  Evaluation: MISMATCH
+  Reproduction: 3 / 3 equivalent mismatches
+  Finding: Reproduced Expectation Mismatch
+```
+
+Attempts that disagree are reported as flakiness rather than promoted to a stable
+bug, and an attempt that could not run is never counted as confirmation:
+
+```console
+  Reproduction: FLAKY (2 of 3 attempts agreed; the behaviour is not stable
+  and is not reported as a defect)
+
+  Reproduction: RECHECK_FAILED (1 of 2 attempts could not be evaluated;
+  an environment failure is not confirmation)
+```
+
+Two observations are compared on outcome kind and typed value (or exception class),
+never on duration, execution id, container id, or temporary path. `NaN` and
+`-0.0` get stable canonical descriptors so deduplication stays predictable.
+
+#### What is deliberately not inferred
+
+- **Production assertions are not universal contracts.** `assert balance >= 0` in
+  a public function states a precondition. A raised `AssertionError` is recorded
+  as `ASSERTION_OBSERVED` and asks for review; it is never reported as a
+  confirmed defect.
+- **Validation guard reachability is not inferred.** `if amount < 0: raise` exists
+  in the source, which says nothing about whether that branch ran for this input.
+  Guards are retained as explanatory context and never evaluated.
+- **Returning normally proves nothing about assertions inside the function.**
+- **Ambiguous or unresolved test callees are never attached to a target.**
+- **Non-literal test arguments are never evaluated.** A fixture, a constant, or a
+  constructor call makes exact matching impossible, and EdgeHunter does not run the
+  test to find out.
+- **Omitted defaults are not evaluated.** `f(1)` is not assumed equivalent to
+  `f(1, 10)` even where the signature makes the value knowable in principle.
+- **Identity comparisons are limited to `None`.** `x is y` between arbitrary values
+  is not something the evaluator can observe, and `==` is not a substitute.
+- **Custom exception identity is not guessed.** A bare `PaymentError` in a test and
+  a bare `PaymentError` at runtime are reported `INCONCLUSIVE`, because two modules
+  may define the same class name.
+- **Custom return objects are not compared.** When the protocol cannot represent a
+  return value, the result is `UNSUPPORTED`, never `MISMATCH`.
+- **An unverified source snapshot yields no verdict.** Oracle evidence describes a
+  specific revision; if the executed bytes cannot be proven to be those bytes, the
+  status is `INCONCLUSIVE`.
+
+#### What this does not claim
+
+EdgeHunter does not attempt complete Python correctness verification. It does not
+treat every exception as a bug, infer general semantic properties, turn production
+assertions into universal contracts, support arbitrary test frameworks, or
+eliminate all false positives. A mismatch is evidence that one explicit,
+applicable expectation and one observation disagree — nothing more. Bug severity
+and impact assessment are not performed in this phase.
 
 ## Architecture
 
@@ -721,6 +955,17 @@ src/edgehunter/
 │   ├── staging.py     read-only source copy with containment and size limits
 │   ├── docker.py      the only module that starts a host process (the docker CLI)
 │   └── repository.py  selection, staging, one container per plan, decoding
+├── evaluation/        oracle layer: did the observation disagree with an expectation
+│   ├── __init__.py    public interface
+│   ├── models.py      statuses, findings, reproduction, provenance models
+│   ├── applicability.py  exact target + exact argument binding
+│   ├── compare.py     Python's own operator semantics over decoded values
+│   ├── exceptions.py  expected-vs-observed exception identity
+│   ├── evaluator.py   applicability first, then the verdict (pure, no Docker)
+│   ├── findings.py    evidence-backed classification + deterministic dedup
+│   ├── repository.py  snapshot verification, reproduction, JSON artifact
+│   ├── recheck.py     attempt sequence bookkeeping
+│   └── values.py      materialization + canonical identity (NaN, -0.0 safe)
 └── runtime/           the trusted worker: the ONLY code that loads target code
     ├── __init__.py    package marker
     ├── worker.py      in-container loader/invoker, runs only inside the sandbox
@@ -786,7 +1031,7 @@ test expectations (+ resolution)                                      │
                           cli.py          formatted output
 ```
 
-Future subsystems (execution, oracle evaluation, findings, search policy) will be
+Future subsystems (counterexample search, failure shrinking, a search policy) will be
 added as new sibling packages, each with typed interfaces, once the features they
 support actually exist. In particular, the strategy plans are deliberately *not*
 tied to a generator library: a later phase may translate them into Hypothesis
@@ -820,9 +1065,11 @@ mypy                        # strict type checking (configured in pyproject.toml
 - [x] safe baseline synthesis (no fabricated placeholders)
 - [x] invocation planning (single adversarial action + labelled fillers)
 - [x] strategy planning (framework-independent descriptions)
+- [x] isolated execution (hardened Docker backend, explicit opt-in, no host fallback)
+- [x] runtime oracle evaluation (exact applicability, safe comparison, expected
+      exceptions, optional bounded reproduction, conservative findings)
 - [ ] property-based test generation
-- [ ] isolated execution
-- [ ] runtime oracle evaluation
+- [ ] counterexample search
 - [ ] failure shrinking
 - [ ] adaptive neighborhood search
 - [ ] learned search policy

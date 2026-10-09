@@ -4,6 +4,11 @@ __pycache__/
 *.egg-info/
 .eggs/
 
+# Generated run artifacts. Oracle evaluation can write a versioned JSON report
+# under .edgehunter/runs/. It is derived from a local scan and must never be
+# committed.
+.edgehunter/
+
 # Virtual environments
 .venv/
 venv/
