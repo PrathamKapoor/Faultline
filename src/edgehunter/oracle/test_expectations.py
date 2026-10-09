@@ -19,7 +19,7 @@ from __future__ import annotations
 import ast
 from dataclasses import replace
 from pathlib import Path
-from typing import Final
+from typing import Final, NamedTuple
 
 from edgehunter.analysis.models import ComparisonOperator, invert_comparison_operator
 from edgehunter.oracle.models import (
@@ -107,7 +107,8 @@ def _expectation(
         call_expression=call_text,
         comparison_operator=operator,
         expected_expression=render_source(expected),
-        literal_arguments=_literal_arguments(call),
+        literal_arguments=tuple(text for text, _ in _literal_arguments(call)),
+        argument_positions=tuple(position for _, position in _literal_arguments(call)),
         evidence=(
             OracleEvidence(
                 kind=OracleEvidenceKind.TEST_ASSERTION,
@@ -119,35 +120,109 @@ def _expectation(
     )
 
 
-def _literal_arguments(call: ast.Call) -> tuple[str, ...]:
-    """Positional arguments that are pure literals, in call order.
+def _literal_arguments(call: ast.Call) -> tuple[tuple[str, int], ...]:
+    """Literal positional arguments paired with their zero-based call position.
 
     These are real observed inputs a repository author already chose, which makes
     them stronger evidence than a synthesized baseline. Anything that is not
     literal syntax — a fixture, a name, a constructor call, a subscript — is
-    skipped rather than evaluated.
+    skipped rather than evaluated, and its position is still accounted for so the
+    surviving literals keep their true binding.
+
+    Returning ``(text, position)`` pairs rather than bare text is deliberate. A
+    bare tuple would silently shift every literal left whenever a non-literal
+    argument precedes it, so ``add(fixture, 2)`` would report ``("2",)`` and a
+    consumer zipping that against parameters in declaration order would bind
+    ``2`` to ``a`` instead of ``b``.
     """
-    literals: list[str] = []
-    for argument in call.args:
+    literals: list[tuple[str, int]] = []
+    for position, argument in enumerate(call.args):
         if isinstance(argument, ast.Starred):
             continue
         text = _literal_text(argument)
         if text is not None:
-            literals.append(text)
+            literals.append((text, position))
     return tuple(literals)
 
 
 def _literal_text(node: ast.expr) -> str | None:
-    """Render one argument as literal text, or return ``None`` when it is not one."""
+    """Render one argument as literal text, or return ``None`` when it is not one.
+
+    The whitelist is deliberately syntactic and closed: constants (including
+    signed numerics, which Python parses as ``UnaryOp`` over a constant), and
+    list/tuple/set/dict displays whose elements are themselves literal. A name,
+    attribute, subscript, call, f-string, comprehension, lambda, or starred
+    element returns ``None`` and is therefore never recorded.
+
+    Nothing here is evaluated. The text is recorded so a later stage can attempt
+    strict recognition against the protocol's own literal grammar; failing that
+    recognition is a supported outcome, not a crash.
+    """
     if isinstance(node, ast.Constant):
         return render_source(node)
-    if isinstance(node, ast.List) and not node.elts:
-        return "[]"
-    if isinstance(node, ast.Tuple) and not node.elts:
-        return "()"
-    if isinstance(node, ast.Dict) and not node.keys:
-        return "{}"
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.UAdd, ast.USub))
+        and isinstance(node.operand, ast.Constant)
+    ):
+        return render_source(node)
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        if any(isinstance(element, ast.Starred) for element in node.elts):
+            return None
+        if all(_literal_text(element) is not None for element in node.elts):
+            return render_source(node)
+        return None
+    if isinstance(node, ast.Dict):
+        if node.keys and not any(key is not None for key in node.keys):
+            return None
+        for key, value in zip(node.keys, node.values, strict=True):
+            if key is None or _literal_text(key) is None or _literal_text(value) is None:
+                return None
+        return render_source(node)
     return None
+
+
+class _CallShape(NamedTuple):
+    """The literal/positional/starred shape of one mined call.
+
+    ``positional_argument_count`` and ``keyword_argument_count`` count what the
+    call wrote, literals or not. Comparing those counts against the number of
+    recorded literals is what tells a later stage whether the call is *entirely*
+    literal and therefore exactly matchable.
+    """
+
+    literal_arguments: tuple[str, ...]
+    argument_positions: tuple[int, ...]
+    positional_argument_count: int
+    keyword_arguments: tuple[tuple[str, str], ...]
+    keyword_argument_count: int
+    starred_arguments: bool
+
+
+def _call_shape(call: ast.Call) -> _CallShape:
+    """Record the literal arguments and the full argument shape of one call."""
+    literals = _literal_arguments(call)
+    keywords: list[tuple[str, str]] = []
+    keyword_count = 0
+    starred = False
+    for keyword in call.keywords:
+        keyword_count += 1
+        if keyword.arg is None:
+            starred = True
+            continue
+        text = _literal_text(keyword.value)
+        if text is not None:
+            keywords.append((keyword.arg, text))
+    if any(isinstance(argument, ast.Starred) for argument in call.args):
+        starred = True
+    return _CallShape(
+        literal_arguments=tuple(text for text, _ in literals),
+        argument_positions=tuple(position for _, position in literals),
+        positional_argument_count=len(call.args),
+        keyword_arguments=tuple(keywords),
+        keyword_argument_count=keyword_count,
+        starred_arguments=starred,
+    )
 
 
 def _raises_expectations(
@@ -170,7 +245,8 @@ def _raises_expectations(
             callee=_callee_name(body_call),
             call_expression=call_text,
             exception=exception,
-            literal_arguments=_literal_arguments(body_call),
+            literal_arguments=tuple(text for text, _ in _literal_arguments(body_call)),
+            argument_positions=tuple(position for _, position in _literal_arguments(body_call)),
             evidence=(
                 OracleEvidence(
                     kind=OracleEvidenceKind.TEST_RAISES,

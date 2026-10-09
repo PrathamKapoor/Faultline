@@ -29,3 +29,25 @@ htmlcov/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Secrets and local credentials. EdgeHunter needs none of these; the patterns
+# exist so an accidentally created local file is never committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+service-account*.json
+id_rsa
+id_ed25519
+
+# Local runtime state and data
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/

@@ -218,7 +218,8 @@ skipped.
 
 ## 11. Critical Context
 
-- Repo `C:\Projects\edgehunter`, branch `main`, no remote. Never push.
+- Repo `edgehunter`, branch `main`, remote `origin` -> `PrathamKapoor/Faultline`.
+  Published as a public snapshot; do not force-push over it.
 - Python 3.10+; the venv is `.venv`. Run gates as
   `.venv\Scripts\python.exe -m pytest -q`, `-m ruff check src tests`,
   `-m ruff format src tests`, `-m mypy`.

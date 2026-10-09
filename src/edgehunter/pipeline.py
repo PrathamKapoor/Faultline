@@ -106,7 +106,10 @@ def analyze_discovered(
         risk=rank_profiles(tuple(profiles)),
         generation=generation,
         planning=build_repository_planning(
-            generation, modules, _observed_literals(oracles.test_expectations)
+            generation,
+            modules,
+            _observed_literals(oracles.test_expectations),
+            _observed_positions(oracles.test_expectations),
         ),
         annotations=annotation_report(modules),
     )
@@ -130,3 +133,22 @@ def _observed_literals(
             continue
         observed.setdefault(expectation.target, expectation.literal_arguments)
     return observed
+
+
+def _observed_positions(
+    expectations: tuple[TestExpectationCandidate, ...],
+) -> dict[str, tuple[int, ...]]:
+    """The call position of each observed literal, keyed by resolved target.
+
+    Kept beside :func:`_observed_literals` so a literal is bound by the position
+    it was written at. A literal tuple on its own would shift left whenever an
+    earlier argument was not a literal.
+    """
+    positions: dict[str, tuple[int, ...]] = {}
+    for expectation in expectations:
+        if expectation.resolution is not TargetResolution.RESOLVED:
+            continue
+        if expectation.target is None or not expectation.literal_arguments:
+            continue
+        positions.setdefault(expectation.target, expectation.argument_positions)
+    return positions

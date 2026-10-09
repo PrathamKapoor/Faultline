@@ -72,23 +72,34 @@ def build_repository_planning(
     generation: RepositoryGeneration,
     modules: tuple[ModuleAnalysis, ...],
     test_literals: dict[str, tuple[str, ...]] | None = None,
+    test_positions: dict[str, tuple[int, ...]] | None = None,
 ) -> RepositoryPlanning:
     """Lift every candidate case into a plan and derive every strategy plan.
 
     ``test_literals`` maps a target's qualified name to the literal arguments a
-    resolved existing test passed to it, in call order.
+    resolved existing test passed to it, and ``test_positions`` gives the call
+    position of each. They are separate maps because a literal's binding follows
+    the position it was written at, not its index within the literal tuple.
     """
     located = _functions_by_target(modules)
     functions = {name: function for name, (_, function) in located.items()}
     actions_by_target = {entry.target: entry.actions for entry in generation.action_sets}
     observed = test_literals or {}
+    positions = test_positions or {}
 
     plans: list[InvocationPlan] = []
     for case in generation.cases:
         function = functions.get(case.target)
         if function is None:
             continue
-        plans.append(plan_case(case, function, observed.get(case.target, ())))
+        plans.append(
+            plan_case(
+                case,
+                function,
+                observed.get(case.target, ()),
+                positions.get(case.target, ()),
+            )
+        )
 
     strategies = tuple(
         plan_strategies(relative_path, function, actions_by_target.get(name, ()))

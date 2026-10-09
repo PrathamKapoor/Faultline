@@ -125,6 +125,37 @@ class TestExpectationCandidate:
     classify it.
     """
 
+    argument_positions: tuple[int, ...] = ()
+    """The zero-based call position of each entry in ``literal_arguments``.
+
+    Recorded because skipping a non-literal shifts every later literal: in
+    ``add(fixture, 2)`` the literal ``2`` is at position 1, not position 0.
+    Consumers must zip the two tuples together rather than treating
+    ``literal_arguments`` as an ordered argument list. Entries here always line
+    up one-for-one with ``literal_arguments``.
+    """
+
+    positional_argument_count: int = 0
+    """How many positional arguments the call wrote, literal or not.
+
+    Compared against ``len(literal_arguments)`` to decide whether the call's
+    positional arguments are *entirely* literal. A single non-literal argument
+    makes exact input matching impossible, because its value is not known.
+    """
+
+    keyword_arguments: tuple[tuple[str, str], ...] = ()
+    """Literal keyword arguments as ``(name, text)`` pairs, in source order."""
+
+    keyword_argument_count: int = 0
+    """How many keyword arguments the call wrote, literal or not."""
+
+    starred_arguments: bool = False
+    """True when the call used ``*args`` or ``**kwargs``.
+
+    A starred argument expands to an unknown number of values, so a call that
+    uses one can never be matched exactly to a single recorded invocation.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class TargetOracleSupport:

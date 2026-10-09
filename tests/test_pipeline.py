@@ -10,6 +10,7 @@ import edgehunter.scanner.ast_parser as ast_parser_module
 from edgehunter.generation import SemanticActionKind
 from edgehunter.oracle import OracleSupport, PropertyKind, TargetResolution
 from edgehunter.pipeline import analyze_repository
+from edgehunter.scanner.ast_parser import SourceText
 
 
 def write_repo(tmp_path: Path, files: dict[str, str]) -> None:
@@ -40,7 +41,7 @@ def test_full_pipeline_reads_each_file_exactly_once(
     reads: list[Path] = []
     original_read = ast_parser_module._read_source
 
-    def counting_read(path: Path) -> str:
+    def counting_read(path: Path) -> SourceText:
         reads.append(path)
         return original_read(path)
 
@@ -110,7 +111,7 @@ def test_action_selection_does_not_add_a_second_read(
     reads: list[Path] = []
     original_read = ast_parser_module._read_source
 
-    def counting_read(path: Path) -> str:
+    def counting_read(path: Path) -> SourceText:
         reads.append(path)
         return original_read(path)
 
@@ -266,7 +267,7 @@ def test_annotation_and_planning_do_not_add_a_second_read(
     reads: list[Path] = []
     original_read = ast_parser_module._read_source
 
-    def counting_read(path: Path) -> str:
+    def counting_read(path: Path) -> SourceText:
         reads.append(path)
         return original_read(path)
 

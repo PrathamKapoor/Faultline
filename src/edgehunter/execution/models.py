@@ -236,15 +236,26 @@ class StagedSource:
 
     ``root`` is a directory EdgeHunter created. Nothing inside it is a symlink,
     every path was checked for containment, and the copy is mounted read-only.
+    ``digests`` pairs each staged relative POSIX path with the SHA-256 of the
+    bytes actually written, so the executed revision can be compared with the
+    analyzed one.
     """
 
     root: Path
     files: tuple[Path, ...]
     total_bytes: int
+    digests: tuple[tuple[str, str], ...] = ()
 
     def relative_path(self, relative: str) -> Path:
         """Absolute staged path for a POSIX-style relative source path."""
         return self.root / Path(relative)
+
+    def digest_for(self, relative: str) -> str | None:
+        """The staged digest for one relative POSIX path, or ``None`` if absent."""
+        for name, digest in self.digests:
+            if name == relative:
+                return digest
+        return None
 
 
 @dataclass(frozen=True, slots=True)

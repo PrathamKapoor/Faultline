@@ -112,13 +112,14 @@ def test_excluded_directories_contribute_no_semantics(tmp_path: Path) -> None:
 
 def test_each_source_file_is_read_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import edgehunter.scanner.ast_parser as ast_parser_module
+    from edgehunter.scanner.ast_parser import SourceText
 
     (tmp_path / "a.py").write_text("def f(x: int):\n    if x > 0:\n        ...\n", encoding="utf-8")
 
     reads: list[Path] = []
     original = ast_parser_module._read_source
 
-    def counting_read_source(path: Path) -> str:
+    def counting_read_source(path: Path) -> SourceText:
         reads.append(path)
         return original(path)
 

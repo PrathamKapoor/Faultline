@@ -133,6 +133,13 @@ class ModuleAnalysis:
     classes: tuple[ClassInfo, ...]
     syntax_issue: SyntaxIssue | None = None
     read_issue: ReadIssue | None = None
+    digest: str | None = None
+    """SHA-256 of the source bytes, taken during the single read.
+
+    Carried so an execution stage can prove the copy it is about to run is the
+    same revision this analysis describes. It is provenance, not a semantic fact,
+    and is ``None`` when the file could not be read.
+    """
 
     @property
     def is_parsed(self) -> bool:

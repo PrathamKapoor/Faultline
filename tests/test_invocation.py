@@ -234,7 +234,14 @@ def test_existing_test_literals_are_used_as_baselines(tmp_path: Path) -> None:
     assert plan.status is InvocationStatus.COMPLETE_FUNCTION
 
 
-def test_non_literal_test_argument_is_not_used(tmp_path: Path) -> None:
+def test_non_literal_argument_does_not_shift_the_literal_baseline(tmp_path: Path) -> None:
+    """The literal keeps its real call position when an earlier argument is skipped.
+
+    ``add(fixture, 2)`` writes ``2`` at position 1, so it belongs to ``b``. The
+    pre-Phase-6B behaviour dropped ``fixture`` and returned ``("2",)``, which the
+    planner then bound to ``a`` by declaration order — the literal moved one
+    parameter to the left of where the test actually put it.
+    """
     scan = _scan(tmp_path)
     (tmp_path / "test_service.py").write_text(
         "def test_add():\n    assert add(fixture, 2) == 3\n", encoding="utf-8"
@@ -244,9 +251,31 @@ def test_non_literal_test_argument_is_not_used(tmp_path: Path) -> None:
     plan = _plan_for(scan, "add", "set_zero")
 
     assert _assignment(plan, "a").origin is AssignmentOrigin.ADVERSARIAL_ACTION
-    # ``fixture`` is not a literal, so only the second positional literal maps.
-    assert _assignment(plan, "b").origin is AssignmentOrigin.STATIC_TYPE_BASELINE
-    assert _assignment(plan, "b").value_text == "0"
+    assert _assignment(plan, "b").origin is AssignmentOrigin.EXISTING_TEST_BASELINE
+    assert _assignment(plan, "b").value_text == "2"
+
+
+def test_literal_after_an_unknown_first_argument_is_never_bound_to_the_first(
+    tmp_path: Path,
+) -> None:
+    """The first parameter is not filled from a literal written at position 1."""
+    scan = _scan(tmp_path)
+    (tmp_path / "test_service.py").write_text(
+        "def test_add():\n    assert add(fixture, 2) == 3\n", encoding="utf-8"
+    )
+    scan = analyze_repository(tmp_path)
+
+    plans = [
+        plan
+        for plan in scan.planning.plans
+        if plan.target == "add" and plan.primary_action.parameter == "b"
+    ]
+
+    assert plans, "expected a plan whose adversarial parameter is b"
+    for plan in plans:
+        first = _assignment(plan, "a")
+        # ``a`` was the unknown ``fixture``; it must not be quietly given the 2.
+        assert first.value_text != "2"
 
 
 def test_unresolved_expectation_never_supplies_a_baseline(tmp_path: Path) -> None:

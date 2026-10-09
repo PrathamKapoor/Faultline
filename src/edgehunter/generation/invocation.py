@@ -157,16 +157,19 @@ def plan_case(
     case: CandidateCase,
     function: FunctionInfo,
     test_literals: tuple[str, ...] = (),
+    test_positions: tuple[int, ...] = (),
 ) -> InvocationPlan:
     """Complete one candidate case into an invocation plan.
 
     ``test_literals`` are literal arguments observed in a resolved existing test
-    for this target, already ordered. They are stronger evidence than a generic
-    baseline, so they take precedence.
+    for this target, and ``test_positions`` are the call positions they were
+    written at. They are stronger evidence than a generic baseline, so they take
+    precedence. Positional information is carried separately so a literal is
+    never bound to a parameter just because an earlier argument was skipped.
     """
     parameters = _plannable_parameters(function)
     primary_name = case.action.parameter
-    observed = _map_observed_literals(parameters, test_literals)
+    observed = _map_observed_literals(parameters, test_literals, test_positions)
 
     dependency_name, dependency_value = _resolve_symbolic_dependency(case.action, parameters)
 
@@ -327,22 +330,30 @@ def _filler_assignment(
 
 
 def _map_observed_literals(
-    parameters: tuple[ParameterInfo, ...], test_literals: tuple[str, ...]
+    parameters: tuple[ParameterInfo, ...],
+    test_literals: tuple[str, ...],
+    test_positions: tuple[int, ...] = (),
 ) -> dict[str, str]:
     """Map literal arguments observed in a test onto this target's parameters.
 
-    Positional literals fill parameters in declaration order. Anything that does
-    not line up with a positional-capable parameter is dropped rather than
-    guessed.
+    Each literal is bound by the call position it was written at, never by its
+    index within the literal tuple. ``add(fixture, 2)`` binds ``2`` to ``b``:
+    positions arrive from mining, and a literal at position 1 is the second
+    argument no matter how many earlier arguments were skipped. When no
+    positions were supplied the tuple is treated as a dense positional list,
+    which is what a caller with only literals in hand can honestly assume.
     """
     positional = [
         parameter
         for parameter in parameters
         if parameter.kind in (ParameterKind.POSITIONAL_ONLY, ParameterKind.POSITIONAL_OR_KEYWORD)
     ]
+    positions = test_positions if test_positions else tuple(range(len(test_literals)))
     mapped: dict[str, str] = {}
-    for parameter, literal in zip(positional, test_literals, strict=False):
-        mapped.setdefault(parameter.name, literal)
+    for literal, position in zip(test_literals, positions, strict=False):
+        if position >= len(positional):
+            break
+        mapped.setdefault(positional[position].name, literal)
     return mapped
 
 

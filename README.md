@@ -193,8 +193,8 @@ What this does **not** claim:
 Requires Python 3.10 or newer.
 
 ```bash
-git clone <repository-url>
-cd edgehunter
+git clone https://github.com/PrathamKapoor/Faultline.git
+cd Faultline
 python -m venv .venv
 # Windows:
 .venv\Scripts\activate
@@ -215,7 +215,7 @@ edgehunter 0.1.0
 
 $ edgehunter scan .
 EdgeHunter scan
-  target (directory): C:\Projects\edgehunter
+  target (directory): /path/to/your/repository
 
   Python files discovered: 49
   Parsed successfully:     49

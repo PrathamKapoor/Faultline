@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from edgehunter.execution.models import StagedSource, StagingFailure
+from edgehunter.fingerprint import fingerprint_bytes
 from edgehunter.scanner.repository import is_excluded_directory
 
 MAX_STAGED_FILES = 100
@@ -81,6 +82,7 @@ def stage_source(
 
     total = 0
     staged: list[Path] = []
+    digests: list[tuple[str, str]] = []
     for relative in candidates:
         origin = _safe_origin(root, relative)
         size = origin.stat().st_size
@@ -96,10 +98,16 @@ def stage_source(
                 f"staged total exceeds the {bounds.max_total_bytes} byte limit",
             )
         target = destination / relative
-        _copy(origin, target)
+        digest = _copy(origin, target)
         staged.append(target)
+        digests.append((relative, digest))
 
-    return StagedSource(root=destination, files=tuple(staged), total_bytes=total)
+    return StagedSource(
+        root=destination,
+        files=tuple(staged),
+        total_bytes=total,
+        digests=tuple(digests),
+    )
 
 
 def discover_python_sources(source_root: Path) -> tuple[str, ...]:
@@ -155,15 +163,23 @@ def _safe_origin(root: Path, relative: str) -> Path:
     return resolved
 
 
-def _copy(origin: Path, destination: Path) -> None:
-    """Copy one verified file, creating parent directories inside the staging root."""
+def _copy(origin: Path, destination: Path) -> str:
+    """Copy one verified file, returning the SHA-256 of the bytes copied.
+
+    The bytes are read once into memory (bounds already proved the file small),
+    hashed, and written. Hashing the bytes that are actually written, rather than
+    the origin path a second time, means the recorded digest describes the staged
+    copy itself.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise StagingError(
             StagingFailure.UNSAFE_FILE_TYPE,
             f"duplicate destination for {origin.name!r}; target identity is ambiguous",
         )
+    data = origin.read_bytes()
     shutil.copyfile(origin, destination)
+    return fingerprint_bytes(data)
 
 
 def remove_staged(staged: StagedSource) -> None:

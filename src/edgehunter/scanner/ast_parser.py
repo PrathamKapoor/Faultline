@@ -21,16 +21,31 @@ scanner models.
 from __future__ import annotations
 
 import ast
+import io
 import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
+from edgehunter.fingerprint import fingerprint_bytes
 from edgehunter.scanner.models import (
     ModuleAnalysis,
     ReadIssue,
     SyntaxIssue,
 )
 from edgehunter.scanner.targets import extract_module_targets
+
+
+@dataclass(frozen=True, slots=True)
+class SourceText:
+    """Decoded source text plus the fingerprint of the bytes it came from.
+
+    The digest is computed from the raw bytes, because those are what the
+    interpreter executes. It lets a later stage prove that the copy it is about
+    to run is the same revision this text was analyzed from.
+    """
+
+    text: str
+    digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +57,12 @@ class SourceFile:
     tree: ast.Module | None
     syntax_issue: SyntaxIssue | None = None
     read_issue: ReadIssue | None = None
+    digest: str | None = None
+    """SHA-256 of the source bytes, or ``None`` when the file could not be read.
+
+    Carried so a staged execution copy can be checked against the revision the
+    oracle evidence was mined from. It is not part of any public analysis model.
+    """
 
     @property
     def is_parsed(self) -> bool:
@@ -66,16 +87,17 @@ def parse_source_file(path: Path, relative_path: Path) -> SourceFile:
         )
 
     try:
-        tree = ast.parse(source, filename=str(path))
+        tree = ast.parse(source.text, filename=str(path))
     except SyntaxError as exc:
         return SourceFile(
             path=path,
             relative_path=relative_path,
             tree=None,
             syntax_issue=SyntaxIssue(line=exc.lineno, column=exc.offset, message=exc.msg),
+            digest=source.digest,
         )
 
-    return SourceFile(path=path, relative_path=relative_path, tree=tree)
+    return SourceFile(path=path, relative_path=relative_path, tree=tree, digest=source.digest)
 
 
 def build_module_analysis(source: SourceFile) -> ModuleAnalysis:
@@ -88,6 +110,7 @@ def build_module_analysis(source: SourceFile) -> ModuleAnalysis:
             classes=(),
             syntax_issue=source.syntax_issue,
             read_issue=source.read_issue,
+            digest=source.digest,
         )
 
     functions, classes = extract_module_targets(source.tree)
@@ -96,6 +119,7 @@ def build_module_analysis(source: SourceFile) -> ModuleAnalysis:
         relative_path=source.relative_path,
         functions=functions,
         classes=classes,
+        digest=source.digest,
     )
 
 
@@ -110,7 +134,19 @@ def analyze_python_file(path: Path, relative_path: Path) -> ModuleAnalysis:
     return build_module_analysis(parse_source_file(path, relative_path))
 
 
-def _read_source(path: Path) -> str:
-    """Read Python source using Python's own encoding rules (PEP 263)."""
-    with tokenize.open(path) as stream:
-        return stream.read()
+def _read_source(path: Path) -> SourceText:
+    """Read Python source once, using Python's own encoding rules (PEP 263).
+
+    The bytes are read once and both the decoded text and the SHA-256 digest are
+    derived from that single read, so fingerprinting adds no extra I/O. Decoding
+    reproduces ``tokenize.open`` exactly: ``detect_encoding`` handles the BOM and
+    any coding cookie, and ``TextIOWrapper`` applies universal newlines, so the
+    text handed to ``ast.parse`` is identical to what the previous implementation
+    produced.
+    """
+    data = path.read_bytes()
+    buffer = io.BytesIO(data)
+    encoding, _ = tokenize.detect_encoding(buffer.readline)
+    buffer.seek(0)
+    with io.TextIOWrapper(buffer, encoding=encoding, line_buffering=True) as stream:
+        return SourceText(text=stream.read(), digest=fingerprint_bytes(data))
