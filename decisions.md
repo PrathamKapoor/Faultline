@@ -949,7 +949,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 - Files: src/edgehunter/cli.py, tests/test_shrink_cli.py
 ### D-093: A new `search` package owns the policy, and the three concepts stay separate
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: Until now every executed candidate came from a list computed before execution began. The phase needs a real causal loop -- available actions, policy selection, execution, oracle verdict, typed feedback, state update, next selection -- without letting that loop dissolve into one large function that mixes proposing an input, judging it, and deciding what happens next.
 - Decision: A new package `src/edgehunter/search/` with four modules and a strict split. `models.py` holds the typed vocabulary (`SearchAction`, `SearchFeedback`, `SearchState`, `SearchBudgets`, `SearchResult`, `SearchTermination`, `SelectionUse`, `PolicyName`). `actions.py` enumerates the candidate universe and is pure arithmetic. `policy.py` holds only `select(state, available) -> SearchSelection | None` behind a `SearchPolicy` protocol. `state.py` holds only `update_state()` transitions. `repository.py` owns orchestration, budgets, and stopping, and is the only module in the package that imports the execution layer.
 - Why: Three concepts are being kept apart. A **semantic action** is *what input is proposed* (`SearchAction`: value, origin, reason, stable id). A **search policy** is *which available action comes next*. **Execution feedback** is *what actually happened* (`SearchFeedback`, derived from the existing evaluator, never invented by the searcher). A policy that could also propose values would make "this policy chose differently" indistinguishable from "this generator produced different candidates", which is exactly the attribution a baseline comparison depends on.
@@ -959,7 +959,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-094: A closed ten-kind integer action vocabulary with five recorded origins
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: A learned policy will select from a typed list, so an action must be a value with provenance rather than a string. D-029 established a closed vocabulary for Phase 4 actions; reusing it wholesale would misreport provenance.
 - Decision: Ten `SearchActionKind` values -- `CONTRACT_ANCHOR`, `USER_SEED`, `SOURCE_BOUNDARY_AT`, `SOURCE_BOUNDARY_BELOW`, `SOURCE_BOUNDARY_ABOVE`, `STEP_TOWARD_ZERO`, `STEP_AWAY_FROM_ZERO`, `INTEGER_NEIGHBOR_BELOW`, `INTEGER_NEIGHBOR_ABOVE`, `MIDPOINT_TO_ANCHOR` -- crossed with five `ProposalOrigin` values -- `CONTRACT_BOUNDARY`, `USER_SUPPLIED_SEED`, `STATIC_SOURCE_BOUNDARY`, `SEARCH_NEIGHBOR`, `SEARCH_MIDPOINT`. `SearchAction` carries the kind, target identity, parameter, proposed integer, contract id, source fingerprint, origin, reason, priority, and a content-derived `identifier` (`ehs-` + 12 hex of SHA-256 over kind, target, parameter, value, contract, fingerprint, origin).
 - Why: Kind and origin are separate axes because they answer different questions. The *kind* says what transformation produced the number; the *origin* says which evidence justified proposing it. A midpoint and an integer neighbour are both search-derived, but only the second is a transformation that exists in the vocabulary for its own sake. The identifier is derived from content and deliberately excludes `reason` and `priority`, because those are presentation and ordering rather than identity -- including them would make an action's identity change when its wording was edited.
@@ -969,7 +969,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-095: Candidate generation is finite by construction and every value is domain-checked before it is offered
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: The contract's domain is a single inequality, so `x < 0` admits infinitely many integers. Enumerating it would be an unbounded loop, and a large repository could otherwise generate unlimited probes.
 - Decision: The universe is built by applying a **fixed set of operators to a fixed set of starting points** and then truncating to a cap (64 default, 128 hard). Operators: the domain anchor, the user seed, source-derived boundaries, a bounded midpoint chain (at most 6 floor halvings, stopping on no progress), and the adjacent integers of the anchor and the seed. Every proposal is checked against the declared domain inside `SearchContext.admits()` **before** it is offered, deduplicated by value keeping the first in priority order, sorted by the total static key, and truncated.
 - Why: Two properties become structural rather than procedural. *Finiteness* falls out of there being no unbounded loop anywhere in the file, so the cap is a second line of defence rather than the only one. *In-domain or absent* falls out of the check being inside the single `admits()` helper, so no call site can apply the range check and forget the domain check.
@@ -979,7 +979,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-096: Phase 2 comparisons are read directly so a signed literal boundary is not lost
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: Phase 2 boundary mining (D-017, D-018) deliberately keeps references symbolic: for `if x == -2` it records the comparison but emits no boundary whose reference is `-2`, because `-2` classifies as a unary expression. That is the right call for boundary *description*, but it loses precisely the case a neighborhood search most wants -- a target that special-cases one negative integer.
 - Decision: `explore` consumes `TargetSemantics.comparisons` in addition to `TargetBoundaries`. A comparison is resolved by requiring one side to be a bare parameter name (`ExpressionKind.NAME`) and the other to be a **plain signed integer literal**, recognized by an explicit character test -- optional single sign, then ASCII decimal digits, nothing else -- and parsed with the generation layer's existing `parse_integer_literal()`. The operator is inverted through the one shared primitive Phase 2 already uses (`invert_comparison_operator`). An ordered comparison offers below/at/above, following Phase 2's own documented rule; `==` and `!=` offer only the reference.
 - Why: This reads Phase 2's output rather than re-extracting anything, so there is still one comparison extractor in the project. The recognizer is strict on purpose: `-limit`, `-2 + 3`, `-x`, a float, and a call all return `None` and therefore produce no candidate. Inventing a value for a reference the source names but does not define would fabricate an input the code never mentions, which is the same class of error as D-037's removed `None` placeholder.
@@ -989,7 +989,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-097: The static baseline's order is fixed once, total, and never revised after seeing a result
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: The phase's only scientific claim is a comparison against a nonadaptive baseline. A baseline that quietly became adaptive, or whose order was tuned after seeing which order produced better numbers, would make the comparison meaningless.
 - Decision: `StaticPriorityPolicy` selects `min(available, key=SearchAction.static_order_key)` where the key is `(origin rank, action kind rank, abs(value), value, identifier)` with origins ranked anchor, user seed, source boundaries, midpoints, neighbours. The policy reads no feedback of any kind: a parametrized test runs all six `SearchFeedback` values past it and asserts the selection is unchanged. The order is written into the class docstring and is not parameterised, so there is no knob that could be turned per fixture.
 - Why: Every component of the key is total. Magnitude precedes sign so `-2` and `2` never tie on an arbitrary choice, and the identifier is the last component so two genuinely equal candidates still resolve identically every run. That is what makes "two identical search states produce the same next action" a structural property rather than a test that happens to pass.
@@ -999,7 +999,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-098: The feedback policy prefers the nearest untested in-domain neighbour after a match
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: The phase's success criterion is that typed feedback changes the next decision. Logging feedback without changing selection would satisfy the letter of the requirement and none of its purpose.
 - Decision: `FeedbackGuidedPolicy` implements an explicit decision table written out in the class docstring and coded literally in `select()`. After `EXPECTED_BEHAVIOR` it chooses `min(available, key=lambda a: a.distance_key(last_action.value))`, whose first component is `abs(value - reference)` and whose remaining components are the shared static key. After `INCONCLUSIVE` or `UNSUPPORTED` it continues in the shared static order. After `CONFLICTING_EVIDENCE` it stops. After `INFRASTRUCTURE_FAILURE` it stops only when the failure was target-independent.
 - Why: "Explore whether a nearby boundary changes the observed behaviour" is a cheap, falsifiable, deterministic heuristic, and it is stated as a heuristic -- nothing here claims the target's behaviour is monotone or that a neighbour must behave the same way. Proximity reorders candidates but never introduces a nondeterministic tie, because distance is only the first component and the total static key breaks every remaining tie.
@@ -1009,7 +1009,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-099: Reproduction is the orchestrator's rule, applied identically to both policies
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: The first implementation put the verification rerun inside `FeedbackGuidedPolicy`. The matched-budget comparison immediately broke: the static baseline, which never requested a recheck, could never report `violation_reproduced` at all. Comparing a policy that can confirm findings against one that structurally cannot would have measured strictness rather than ordering.
 - Decision: The pending recheck is a loop local (`PendingRecheck`) inside `_run_loop`, applied to whichever policy selected the probe. Neither policy can request or refuse one; a test asserts both return `NEW_PROBE` for a mismatch state. After the recheck the search always terminates, so exactly one verification is performed per contradiction. The verdict maps to `violation_reproduced` (mismatch twice, same signature), `flaky_observation` (recheck matched), or `inconclusive` (recheck unjudgeable, or the two observations disagreed on their failure signature).
 - Why: Reproduction is a soundness requirement, not a strategy. Scoping it to the orchestrator means the two policies differ only in which *new* input they pick, which is precisely the axis under test. It also makes the claim in D-097 literal: the static baseline can reach a finding.
@@ -1019,7 +1019,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-100: Infrastructure failures are split into target-independent and candidate-specific
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: `SearchFeedback` is required to be a six-value vocabulary with exactly one member for an infrastructure failure. That vocabulary alone cannot express "the backend is dead" versus "this one input was slow", and collapsing them either wastes the remaining budget or hides a real problem.
 - Decision: `SearchState` carries `last_outcome: OutcomeKind | None` alongside `last_feedback`, because they answer different questions: the feedback says the contract was not satisfied, the outcome says whether the target was observed at all. `TARGET_INDEPENDENT_OUTCOMES` names the five outcomes that will fail identically for every remaining candidate (`SANDBOX_UNAVAILABLE`, `TARGET_NOT_FOUND`, `INELIGIBLE`, `PROTOCOL_ERROR`, `WORKER_FAILURE`); `is_target_independent()` decides. The policy stops on those and continues, with the reason recorded, on `TIMEOUT` and `IMPORT_FAILURE`.
 - Why: A timeout genuinely can depend on the input -- some inputs are slower than others -- so stopping would discard real exploration. A container that cannot start will not start for the next candidate either, so continuing would spend a real budget proving nothing. Both branches are written out rather than collapsed into "stop on any failure".
@@ -1029,7 +1029,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-101: Both policies share one universe, one budget, and one reproduction threshold
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: A favourable result from the adaptive policy means nothing unless the comparison was fair. Giving the adaptive policy a larger budget, a different candidate set, or a laxer reproduction rule would produce a number that means nothing.
 - Decision: Both policies receive the identical `SearchContext` and therefore the identical `SearchBudgets`, the identical candidate universe, the identical contract adapter (`evaluate_against_contract`), the identical session, and the identical reproduction rule. The only difference is the ordering function. `ExploreRequest.policy_name` selects one; nothing else about the request changes with it.
 - Why: It makes the measured difference attributable to one variable. The real-Docker comparison test prints both measurements from one fixture under one budget, and asserts the budgets, the snapshot verification, and the execution ceiling are equal before asserting anything about the probes.
@@ -1039,7 +1039,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-102: Every static gate is delegated to the shrink package's shared preflight
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: The search needs exactly the checks Phase 7B already built -- contract validation, unambiguous target resolution, the narrow supported target shape, the SHA-256 fingerprint comparison, and conflicting-evidence detection. Copying any of them would eventually disagree with the original, and a disagreement about *whether an oracle applies* is the precise failure this project exists to avoid.
 - Decision: `shrink.repository.preflight_contract()` is exposed as a public function wrapping the existing private `_preflight`, and `explore_integer` calls it with a `ShrinkRequest`. There is no second contract parser, target resolver, shape check, fingerprint comparison, or conflict detector. The one translation is `NOT_SHRINKABLE` → `CONFLICTING_EVIDENCE`, because disagreeing applicable expectations are a stopping condition with their own name in a search.
 - Why: D-079's refusal rules are the soundness floor for any input-changing operation, and a search that changed an input on a weaker gate than the shrinker would be unsound in exactly the way Phase 7B fixed. Reuse also means the safety tests written for shrinking cover this command's gates.
@@ -1049,7 +1049,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-103: The oracle is re-checked for every probe, twice, and a domain violation never reaches a container
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: "The search must only execute inputs its oracle actually governs" is the property the whole phase rests on, and a single check is one refactor away from being bypassed.
 - Decision: The check happens in three places, at three different times. (1) `SearchContext.admits()` filters during enumeration. (2) `evaluate_against_contract()` -- the shrink package's adapter -- is reused for the verdict. (3) `_run_loop` re-checks `contract.domain.contains(action.value)` immediately before calling the runner, and terminates with `inconclusive` if it fails. The third check is independent of the first, so a wrong universe produces a refusal rather than an out-of-domain execution.
 - Why: The generation path and the execution path are edited by different people at different times. A check that exists only in one of them is a check that eventually stops being applied to the other.
@@ -1059,7 +1059,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-104: Budgets are clamped on read, counted on every launch, and never escalate
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: A search that can raise its own budget is not bounded, and a budget that silently clamps without reporting is not honest.
 - Decision: `SearchBudgets` clamps on read: 8/20 distinct probes, 12/32 total executions, 64/128 candidates, 180 s wall clock, reproduction 2. Every `runner.execute_probe` call consumes one execution, including one that produced no observation. A verification rerun consumes an execution but **not** a distinct-probe slot, and the two counters are kept separately as `executions_consumed` and `recheck_executions`. A pending recheck is exempt from the probe budget only; it is not exempt from the execution or wall-clock budget. Clamped values are reported in the artifact and printed by the CLI, so the effective value is always visible.
 - Why: `test_a_budget_too_small_to_recheck_yields_no_finding` is the load-bearing test: with `max_executions=1` the search observes one mismatch, cannot recheck, and must return `execution_budget_exhausted` with `first_reproduced_probe is None`. Anything else would let a single observation become a finding.
@@ -1069,7 +1069,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-105: Ten distinct termination statuses, and no measurement that was not counted
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: The difference between "we tried everything we planned and found nothing" and "we ran out of budget" is the difference between a bounded negative result and an unknown one. Collapsing them, or inventing a quality number the search never observed, would be the same overstatement Phase 7B refused.
 - Decision: `SearchTermination` has exactly ten members -- `violation_reproduced`, `no_reproduced_violation`, `probe_budget_exhausted`, `execution_budget_exhausted`, `wall_time_budget_exhausted`, `flaky_observation`, `inconclusive`, `conflicting_evidence`, `refused`, `sandbox_unavailable` -- and every loop exit assigns one. `SearchResult` reports only counts: policy, snapshot fingerprint, contract id, distinct probes, total executions, recheck executions, reproduction attempts, match/mismatch/inconclusive counts, first mismatch index, first reproduced index, observed wall time, final status. There is no coverage field, no path coverage, no mutation score, no probability, and no severity.
 - Why: `no_reproduced_violation`'s reason states explicitly that it says nothing about inputs that were never tried, and the CLI prints the same sentence. A field that cannot be observed must be omitted rather than estimated, because an estimate would be read as a measurement.
@@ -1079,7 +1079,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-106: The search trace carries no duration, and the artifact reuses the run-id sanitizer
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: A trace is only useful if two runs over the same evidence can be compared. Wall-clock durations differ between runs by nature, so including them would make every document differ and defeat the purpose.
 - Decision: `SearchStep` has no duration field at all. `SearchResult.wall_clock_seconds` exists as a measurement at the result level and is explicitly documented as never used for ordering. `search_artifact_document()` writes strict JSON with its own `schema_version` to `.edgehunter/runs/<run-id>/search.json`, sanitized by the same `_safe_run_id` the Phase 6B and 7B artifacts use, excluding captured stdout, stderr, and exception messages. Each trace entry records the step number, policy, action kind, action identifier, parameter, input, origin, use, selection reason, execution outcome, observation, oracle status, feedback, feedback reason, reproduction status, and both remaining budgets.
 - Why: A selection without a recorded reason cannot be audited, and an unauditable search cannot be compared against another one. Excluding target output keeps the artifact a review file rather than a place secrets accumulate, which is D-069's reason applied unchanged.
@@ -1089,7 +1089,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-107: The `explore` command is explicit and opt-in, and adds no automatic path
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: D-092 established the rule for `shrink`. A command that *starts* executing on its own would be strictly more dangerous, and the phase forbids it explicitly.
 - Decision: `edgehunter explore` requires `--target`, `--contract-file`, `--contract-id`, and `--start-int`, plus `--allow-execution`. `--policy` accepts `static`, `feedback`, and the full enum names. There is no override flag that weakens the exact-input refusal. Exit `0` means the bounded search completed with whatever result it produced; exit `2` means invalid input (including `refused`); exit `3` means `sandbox_unavailable`. Exit `1` remains reserved for `scan`. `scan` and `run` are unchanged, and the presence of a contract file is never authorization.
 - Why: The contract file is selected on the command line and validated before any container starts, which makes the refusal structural rather than procedural. Printing the measurements block only when something actually executed keeps a table of zeroes from appearing beside "Result: refused", which would read like a search that found nothing.
@@ -1099,7 +1099,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-108: The search package adds no dependency and reaches no new execution primitive
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: D-091 made the same commitment for `shrink`, and the project's structural safety suite fails when a new module gains an execution primitive.
 - Decision: No dependency was added. `pyproject.toml` is unchanged and `typer` remains the only runtime dependency. The search package adds no `subprocess`, `importlib`, `pickle`, `eval`, `exec`, or network access. It imports `execution` and `evaluation` for the typed models and the contract adapter, and nothing else reaches outward.
 - Why: Everything needed already existed: `IntegerDomain.closest_to_zero()` for the anchor, `preflight_contract()` for the gates, `evaluate_against_contract()` for the verdict, `signature_of()` for failure equivalence, `open_session()` for the snapshot-fixed execution route, and `_seed_request()` for the typed request.
@@ -1109,7 +1109,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-109: `explore` discovers a contradiction and stops; it never shrinks
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: Discovery and minimization are different operations. Fusing them would make a later experiment unable to attribute a result to either, and would put an unbounded minimization loop inside every search iteration.
 - Decision: On a reproduced contradiction the search records the result and terminates. It does not call the shrinker. The CLI prints the reproduced input and tells the user that `shrink` is the separate operation for minimizing it, using the same contract.
 - Why: Keeping them separate is what makes "search found it after N probes" and "shrink reduced it to M" two measurements rather than one entangled number.
@@ -1119,7 +1119,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-110: A measured comparison is reported as one observation, and never as a percentage
 
-- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), uncommitted
+- Date / phase / commit: 2026-10-13, Phase 7C (Budgeted Adaptive Semantic Neighborhood Search), bf03a2b
 - Context: A single favourable fixture is the easiest way to turn a heuristic into an unsupported claim. The phase rules forbid it, and the README already carries the same discipline for shrinking.
 - Decision: The real-Docker comparison test prints both policies' measurements -- distinct probes, total executions, first mismatch index, first reproduced index, termination status -- from one fixture under one budget. The README states the two numbers and immediately says this is one fixture and not evidence of general superiority. No percentage, no multiple, no "better at finding bugs", and no benchmark table.
 - Why: The numbers are reproducible by anyone running that one test, which is the strongest claim the evidence supports. A percentage would imply a distribution of results that does not exist.

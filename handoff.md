@@ -2,397 +2,423 @@
 
 ## 1. Current Phase
 
-- **Phase:** Phase 7A — Action Coverage Repair + Exception Identity Hardening
+- **Phase:** Phase 7C — Budgeted Adaptive Semantic Neighborhood Search
 - **Subphase:** none (single-session phase)
-- **Objective A:** Make a recognized `bool` or `str` parameter reachable — actions,
-  materialized values, candidate cases, invocation plans, and strategy plans —
-  by reusing the existing generation pipeline end to end.
-- **Objective B:** Make observed exception identity more precise using qualified
-  runtime information, without turning a better observation into a less justified
-  oracle match.
+- **Objective:** Make EdgeHunter's next executed input a function of the previous
+  input's observed behaviour, under a policy interface a future learned model can
+  replace, and measure it against an honest nonadaptive baseline.
 - **Status:** complete
 
 Repository state at handoff: branch `main`, remote `origin` ->
-`PrathamKapoor/Faultline`. Implementation commit `dbb27e2` ("Cover bool and str
-parameters, and observe qualified exception identity"). Version remains `0.1.0`;
-no bump was made (D-002 makes the version literal the single source, and no
-decision requires a bump).
+`PrathamKapoor/Faultline`. Implementation commit `bf03a2b` ("Select the next
+semantic input from the previous probe's verdict"). Phase 7B, which was uncommitted
+at the start of this session, is now committed as `bd7b46c`. Version remains
+`0.1.0`; no bump was made (D-002 makes the version literal the single source and
+no decision requires a bump).
 
 ## 2. Work Completed
 
-Baseline before this session, with the Docker Linux daemon stopped: `711 passed,
-31 skipped`. The Phase 6B handoff's `741 passed, 1 skipped` assumed a live daemon;
-30 of the 31 skips were Docker integration tests. Docker Desktop 4.93.0 was
-already installed and was started (not installed, not reconfigured) to obtain a
-real Linux daemon, after which the true baseline reproduced at `741 passed, 1
-skipped`. This session added:
+Baseline at the start of this session: `1008 passed, 59 skipped` with the Docker
+daemon down (58 skips were Docker integration tests, 1 was a symlink permission).
+The brief's stated baseline of `1066 passed, 1 skipped` could not be reproduced,
+and investigation showed why: **Phase 7B was never committed** and `handoff.md`
+still described Phase 7A. See §11.
 
-Objective A:
+Docker Desktop 4.93.0 was already installed; it was started (not installed, not
+reconfigured) to obtain a real Linux daemon, after which the full Docker
+integration suite ran for real. This session added:
 
-- `ANNOTATION_ACTIONS` now maps `AnnotationKind.BOOL` and `AnnotationKind.STR`
-  (D-070)
-- `SemanticActionKind` grew from fourteen to twenty-one members: `SET_FALSE`,
-  `SET_TRUE`, `EMPTY_STRING`, `WHITESPACE_STRING`, `UNICODE_STRING`,
-  `NULL_CHARACTER_STRING`, `LONG_STRING` (D-071)
-- `materialize_bool()` and `materialize_string()`, each refusing a mismatched
-  annotation shape with `UNSUPPORTED` rather than coercing the value (D-071)
-- `render_string_literal()` as the single rendering for string values, shared by
-  the action layer, the strategy layer, and (asserted equal) the `str` baseline
-  (D-072)
-- `LONG_STRING_LENGTH = 1024`, `UNICODE_STRING_SAMPLE = "é漢🙂"`,
-  `NULL_CHARACTER = "\x00"`, all exported
-- `cli.py::_display_text()`: presentation-only ASCII escaping and length
-  compaction, leaving every stored value exact (D-072)
-- 22 boolean tests, 33 string tests, and 10 real-Docker execution tests
+Blocking, before any code:
 
-Objective B:
+- Phase 7B committed as `bd7b46c` rather than left as untracked work, since
+  Phase 7C builds directly on its contract parser, domain, signature, and
+  execution route
 
-- `_exception_identity()` in the worker: module, qualified name, builtin-by-
-  identity, and real-MRO builtin lineage, read with `type.__getattribute__` so a
-  custom metaclass never runs on the observation path (D-073)
-- four optional fields on `RuntimeObservation`, decoded defensively: a
-  non-boolean becomes unknown, a malformed lineage is dropped entirely rather
-  than repaired (D-073, D-074)
-- `match_exception_observed()` replacing the name comparison, with the decision
-  ladder in D-075; the string-only `match_exception()` kept as a wrapper
-- `TestExpectationCandidate.exception_binding`, recording a test module's own
-  module-scope binding of a bare raised name (D-076)
-- `_outcome()` now clips the exception message itself rather than relying on the
-  call site
-- 27 identity tests, 36 protocol tests, 4 shadowing-mining tests, and 8
-  real-Docker exception tests
+Architecture:
+
+- `src/edgehunter/search/` — a new package in five modules with a strict split:
+  `models.py` (typed vocabulary), `actions.py` (pure candidate universe),
+  `policy.py` (pure selection), `state.py` (pure transitions), `repository.py`
+  (orchestration, budgets, artifact)
+- `SearchAction` with ten `SearchActionKind` values crossed with five
+  `ProposalOrigin` values, a content-derived `ehs-…` identifier, and an optional
+  `semantic_action` field that is `None` for every search-derived value (D-094)
+- `SearchFeedback` with six members, mapped exactly from the existing evaluator's
+  verdict in one total function `feedback_for()` (D-100, D-105)
+- `SearchTermination` with ten distinct statuses that are never collapsed (D-105)
+- `enumerate_search_actions()` — anchor, user seed, mined boundaries, bounded
+  midpoint chain, integer neighbours; deduplicated, totally sorted, truncated to
+  a cap; every value domain-checked inside one `admits()` helper (D-095)
+- `_comparison_boundary_actions()` reads Phase 2's mined comparisons directly, so
+  a target that special-cases a *signed* integer (`if x == -2`) contributes a
+  boundary that Phase 2's miner deliberately keeps symbolic (D-096)
+- `StaticPriorityPolicy` — the documented fixed order, reads no feedback at all
+  (D-097)
+- `FeedbackGuidedPolicy` — after a match, the nearest untested in-domain
+  neighbour; an explicit decision table coded literally rather than described in
+  prose (D-098)
+- Immutable `SearchState` advanced only by pure transitions, with no
+  process-global registry anywhere in the package (D-093)
+- `explore_integer()` orchestrating one snapshot-fixed session: all static gates
+  via the shrink package's shared `preflight_contract()`, one `_stage_workspace`
+  for the whole search, one `SourceSnapshot.verify()` before the first probe
+  (D-102, D-103)
+- `SessionProbeRunner` calling the existing `ExecutionSession.execute` — no new
+  execution primitive, no new staging, no new evaluator
+
+Three defects found and fixed during development:
+
+- **Reproduction was inside the feedback policy**, which meant the static baseline
+  could never report `violation_reproduced` at all — the matched-budget
+  comparison would have measured strictness, not ordering. Reproduction is now
+  orchestrator-owned and applies to both policies identically (D-099).
+- **`update_state()` counted a recheck by execution count** rather than by whether
+  the candidate was already tested, so a probe that ran and rechecked in one call
+  misreported its own accounting. Found by a unit test (D-104).
+- **Infrastructure failures were not split.** A timeout stopped the search even
+  though a timeout can genuinely depend on the input. `SearchState.last_outcome`
+  now carries the raw outcome and `TARGET_INDEPENDENT_OUTCOMES` decides (D-100).
+
+CLI and docs:
+
+- `edgehunter explore PATH --target … --contract-file … --contract-id … --start-int
+  … [--policy static|feedback] [--max-probes] [--max-executions] [--timeout]
+  [--artifact-id] --allow-execution`
+- The measurements block is printed only when something actually executed, so a
+  refusal is never followed by a table of zeroes (D-107)
+- `.edgehunter/runs/<run-id>/search.json`: versioned, evidence-only, sanitized by
+  the same `_safe_run_id` as the Phase 6B and 7B artifacts (D-106)
+- README section "Searching around one integer input"; `decisions.md` D-093
+  through D-110; `flow.md` section 20 (D-110)
+
+Tests: 149 new non-integration tests across five files, plus 10 real-Docker
+integration tests.
 
 ## 3. Files Changed
 
-- `src/edgehunter/generation/actions.py` — `ANNOTATION_ACTIONS` gains `BOOL` and
-  `STR`; `_annotation_action` dispatches by shape
-- `src/edgehunter/generation/models.py` — seven new `SemanticActionKind` members
-  and their `ACTION_KIND_ORDER` ranks
-- `src/edgehunter/generation/materialize.py` — `materialize_bool`,
-  `materialize_string`, `is_string_action`, `render_string_literal`, the string
-  constants, `LONG_STRING_LENGTH`
-- `src/edgehunter/generation/strategy.py` — reads the shared constants and
-  renderer instead of restating them
-- `src/edgehunter/generation/__init__.py` — exports the new surface
-- `src/edgehunter/cli.py` — `_display_text()` and its three call sites
-- `src/edgehunter/runtime/worker.py` — `_exception_identity()` and its helpers;
-  message clipping in `_outcome()`
-- `src/edgehunter/execution/models.py` — four optional identity fields on
-  `RuntimeObservation` plus `exception_identity_text`
-- `src/edgehunter/execution/repository.py` — the four keys in `_RESULT_KEYS`;
-  `_optional_bool()` and `_optional_str_tuple()`
-- `src/edgehunter/evaluation/exceptions.py` — `ExceptionIdentity`,
-  `match_exception_observed()`, the rebuilt matching ladder
-- `src/edgehunter/evaluation/evaluator.py` — `identity_from_observation()` and
-  the qualified `observed_description`
-- `src/edgehunter/oracle/models.py` — `TestExpectationCandidate.exception_binding`
-- `src/edgehunter/oracle/test_expectations.py` — `_module_bindings()` and the
-  binding lookup for bare raised names
-- `tests/test_generation_bool_actions.py` (new)
-- `tests/test_generation_string_actions.py` (new)
-- `tests/test_generation_bool_str_integration.py` (new)
-- `tests/test_evaluation_exception_identity.py` (new)
-- `tests/test_execution_exception_protocol.py` (new)
-- `tests/test_execution_exception_identity_integration.py` (new)
-- `tests/test_pipeline.py`, `tests/test_safety.py`,
-  `tests/test_oracle_test_expectations.py` — two updated, one extended
-- `decisions.md` — D-070 through D-077
-- `flow.md` — sections 11, 15, 16, 18 updated; a Phase 7A session table
-- `README.md` — status, vocabulary, the identity limitation, non-inferences,
-  roadmap
+Created:
+
+```text
+src/edgehunter/search/__init__.py
+src/edgehunter/search/models.py
+src/edgehunter/search/actions.py
+src/edgehunter/search/policy.py
+src/edgehunter/search/state.py
+src/edgehunter/search/repository.py
+tests/test_search_candidates.py
+tests/test_search_policy.py
+tests/test_search_loop.py
+tests/test_search_cli.py
+tests/test_search_integration.py
+```
+
+Modified:
+
+```text
+src/edgehunter/cli.py                      explore command, _print_search, _index_text
+src/edgehunter/shrink/repository.py        added public preflight_contract() wrapper
+src/edgehunter/shrink/__init__.py          export preflight_contract
+README.md                                  explore section, status, roadmap, architecture
+decisions.md                               D-093..D-110
+flow.md                                    section 20 + the Phase 7C changes table
+handoff.md                                 this file
+```
+
+**No existing test was modified or weakened.** Every pre-existing test still
+passes unchanged.
 
 ## 4. Current Architecture / State
 
-Neither objective introduced a subsystem. Both closed a gap inside an existing
-one, which is why the layer boundaries are unchanged:
-
 ```text
-Objective A: annotation shape ──► applicability ──► value ──► case ──► plan
-             (unchanged)          (NEW entries)     (NEW)    (unchanged)
-
-Objective B: raised exception ──► worker metadata ──► observation ──► matcher
-              (unchanged)           (NEW, 4 fields)    (NEW fields)  (NEW ladder)
+explore_integer(scan, root, request, authorized, repository_context, runner)
+ │
+ ├─ _run_static_gates ─────► preflight_contract()  [shrink]  ──► REFUSED / INCONCLUSIVE
+ │                                                                / CONFLICTING_EVIDENCE
+ ├─ enumerate_search_actions(SearchContext)       [search.actions]  pure arithmetic
+ │
+ └─ open_session() ────────────────────────────────► [execution]  ONE staged snapshot
+      └─ SourceSnapshot.verify() ──────────────────► [evaluation]  INCONCLUSIVE if unverified
+      └─ _run_loop(contract, state, policy, runner)
+           ├─ _budget_stop(state, started, recheck_pending)
+           ├─ pending recheck?  ──► _recheck_selection(pending)
+           ├─ else               ──► policy.select(state, state.available)
+           ├─ contract.domain.contains(action.value)          ← third domain check
+           ├─ runner.execute_probe(action)                    [SessionProbeRunner]
+           ├─ evaluate_against_contract(...)                  [shrink]  ← the only adapter
+           ├─ feedback_for(outcome, status)                   [search.models]
+           ├─ _judge_recheck(...)  or  PendingRecheck(...)
+           ├─ update_state(...)                               [search.state]  pure
+           └─ record_step(...)                               [search.state]  pure
 ```
 
-`evaluation/` remains pure: no module there gained an execution primitive, an
-`importlib`/`pickle` import, or its own literal grammar. `tests/
-test_evaluation_safety.py` still passes unchanged. `execution/docker.py`,
-`execution/staging.py`, `execution/eligibility.py`, `execution/assembly.py`, and
-`execution/codec.py` are **unmodified** in this phase — confirmed with
-`git diff --stat`, which reports nothing for those paths. Docker hardening was
-neither relaxed nor re-checked in; the 31 existing docker tests pass untouched.
+Separation of concerns, as required:
 
-`PROTOCOL_VERSION` is still `1`. The four new result keys are optional and absent
-from any non-raised outcome, so a document written before this change still
-decodes with all four fields `None`, and `None` means "never observed" rather than
-`False`.
+| Concern | Module | May import |
+|---|---|---|
+| what input is proposed | `search/actions.py` | `analysis`, `shrink` (typed models only) |
+| which input comes next | `search/policy.py` | `search.models` only |
+| what happened | `search/models.py::feedback_for` | `evaluation.evaluator` |
+| how state advances | `search/state.py` | `search.models`, `execution.models` |
+| when to stop | `search/repository.py` | everything, and only here |
+
+A policy cannot start a container, import target code, or evaluate an oracle. A
+test asserts `time.monotonic`, `random.random`, and `random.randint` all raise
+during selection.
 
 ## 5. Decisions Made
 
-D-070 The `bool`/`str` gap is in action applicability, not annotation parsing.
-D-071 Seven new actions with fixed documented values and a hard length bound.
-D-072 One canonical string renderer; CLI compaction is display-only.
-D-073 Worker reports qualified identity from real class metadata, bypassing any
-metaclass.
-D-074 Protocol stays at version 1 because the change is purely additive.
-D-075 Richer observation buys lineage-based verdicts for builtins, never
-name-based custom matching.
-D-076 A narrow source-level safeguard catches a test module that shadows a builtin
-name.
-D-077 No shrinking, no adaptive search, and an exact oracle does not survive its own
-input change.
+D-093 through D-110, all new this phase, all in `decisions.md`:
 
-Nothing in this phase supersedes an earlier decision. D-070 confirms D-036 was
-correct and fixes a separate table; D-072 tightens D-072's predecessor D-043's
-string spelling but does not reverse it; D-075 extends D-061, which continues to
-govern every custom-exception case.
+| Decision | Summary |
+|---|---|
+| D-093 | A new `search` package; action, policy, and feedback stay separate |
+| D-094 | Closed ten-kind integer action vocabulary with five recorded origins |
+| D-095 | Finite-by-construction universe; every value domain-checked before it is offered |
+| D-096 | Phase 2 comparisons read directly so a signed literal boundary is not lost |
+| D-097 | Static baseline order fixed once, total, never revised after seeing a result |
+| D-098 | Feedback policy prefers the nearest untested in-domain neighbour after a match |
+| D-099 | Reproduction is the orchestrator's rule, applied identically to both policies |
+| D-100 | Infrastructure failures split into target-independent and candidate-specific |
+| D-101 | Both policies share one universe, one budget, one reproduction threshold |
+| D-102 | Every static gate delegated to the shrink package's shared preflight |
+| D-103 | The oracle is checked for every probe, three times, at three different times |
+| D-104 | Budgets clamped on read, counted on every launch, never escalate |
+| D-105 | Ten distinct termination statuses; no measurement that was not counted |
+| D-106 | The trace carries no duration; the artifact reuses the run-id sanitizer |
+| D-107 | `explore` is explicit and opt-in, and adds no automatic path |
+| D-108 | The search package adds no dependency and reaches no new execution primitive |
+| D-109 | `explore` discovers a contradiction and stops; it never shrinks |
+| D-110 | A measured comparison is one observation, never a percentage |
+
+No decision was superseded.
 
 ## 6. Requirements and Constraints
 
-- A `bool` parameter receives `SET_FALSE`/`SET_TRUE` only; a `str` parameter
-  receives the five string actions only. `UNKNOWN` receives neither, and a
-  parameter's *name* is never type evidence.
-- A nullable `bool` or `str` gets its shape actions **and** the pre-existing
-  `SET_NONE`.
-- `BOUNDARY_ACTIONS` remains total and injective over all ten `BoundaryKind`
-  values; the new actions are annotation-driven and have no boundary counterpart.
-- Booleans are `LiteralKind.BOOLEAN` values `False`/`True`, never `0`/`1`, and
-  never coerced into a mismatched shape.
-- `LONG_STRING_LENGTH` is a module constant; the target and CLI cannot influence
-  it, and the value is never truncated.
-- The stored value and the terminal display are separate. `render_string_literal`
-  owns the value; `_display_text` owns the output.
-- Exactly one adversarial assignment per plan. A second parameter is filled by a
-  labelled baseline (`bool`→`False`, `str`→`""`), never by a second adversarial
-  action. There is no Cartesian product.
-- Generation stays independent of risk: risk determines priority, never
-  availability. No risk-scoring change was made.
-- Exactly one renderer spells a string value, so the strategy layer's by-text
-  dedup cannot list the same input twice.
-- The worker reads exception class metadata with `type.__getattribute__` and
-  decides builtin's identity by class identity against `vars(builtins)`. No
-  `repr`, no `str` on an exception, no serialization, no import of a target class
-  on the host.
-- A custom expected exception stays `INCONCLUSIVE`, even when the observed
-  qualified name is textually identical.
-- A name difference is never a mismatch by itself; only a real MRO fact is.
-- An observation with no identity fields keeps the Phase 6B name-only verdicts and
-  is never silently downgraded.
-- Only module-scope shadowing is detected; a function-local import of the same
-  name beside a `pytest.raises` is a documented gap.
-- No severity, no confidence score, no new `FindingKind`, no exception is
-  automatically a finding.
-- No dependencies added or removed. `typer` remains the only runtime dependency.
-- No Hypothesis, no LLM, no shrinker, no adaptive search, no new input
-  combinations.
-- All commits authored solely as PrathamKapoor, with no AI attribution.
-  `paper/`, `research/`, and `*.tex` remain untouched and uncommitted.
+- Docker is the only execution backend; there is no host fallback, and none was
+  added.
+- Docker hardening is unchanged. `execution/docker.py` was **not modified** this
+  phase; a test re-asserts every flag on the shared command builder.
+- No dependency was added. `pyproject.toml` is unchanged; `typer` remains the
+  only runtime dependency.
+- No Hypothesis, LLM, embeddings, RAG, FAISS, Z3, SymPy, or NumPy.
+- No multi-parameter mutation, no stateful sequences, no shrinking inside search.
+- All contracts authored `PrathamKapoor <prathamkapoor027@gmail.com>`, with no
+  co-author or attribution trailers.
+- `paper/`, `research/`, and `*.tex` were never staged.
 
 ## 7. Testing and Verification
 
-Baseline before changes, daemon stopped:
+Final results, Docker daemon live:
 
-- `711 passed, 31 skipped (18.81s)`; ruff check, ruff format, and mypy all clean
+```text
+.venv\Scripts\python.exe -m pytest -q -m "not integration"
+  → 1157 passed, 1 skipped, 68 deselected   (47.81s)
 
-Baseline after starting the existing Docker Desktop, before any Phase 7A code:
+.venv\Scripts\python.exe -m pytest -q -m integration
+  → 68 passed, 1158 deselected              (487.23s)
 
-- `741 passed, 1 skipped`; `mypy: Success: no issues found in 85 source files`
-- `ruff format: 89 files already formatted`
+.venv\Scripts\python.exe -m ruff check .
+  → All checks passed!
 
-Final, same Linux daemon (`linux/amd64`, Docker 29.8.1):
+.venv\Scripts\python.exe -m ruff format --check .
+  → 119 files already formatted
 
-- `881 passed, 1 skipped (355.51s)` — 140 new tests over the 741 baseline
-- ruff check: `All checks passed!`
-- ruff format: `95 files already formatted`
-- mypy strict: `Success: no issues found in 91 source files`
-- `docker ps -a --filter name=edgehunter-run-` empty after the suite
+.venv\Scripts\python.exe -m mypy
+  → Success: no issues found in 115 source files
+```
 
-The single skip is `test_symlink_is_refused_and_not_followed`: creating a symlink
-requires Developer Mode or elevation on this Windows host. The staging code
-refuses symlinks by `is_symlink()` check and the behaviour is unit-covered
-otherwise.
+**Combined: 1225 passed, 1 skipped.** The single skip is
+`tests/test_execution_staging.py:109`, "symlinks are unavailable for this user on
+this platform" — a pre-existing platform limitation, not a gap in this phase.
 
-Real Docker, Phase 7A acceptance, all passing:
+Two full monolithic runs (`pytest -q`, ~10 minutes each) each produced exactly one
+failure, and **a different pre-existing test each time**:
 
-| Case | Expected | Result |
-|---|---|---|
-| `invert(False)` | `True` | pass |
-| `invert(True)` | `False` | pass |
-| argument arrives as a real `bool` | `type(...) is bool` | pass |
-| `length("")` | `0` | pass |
-| `length("é漢🙂")` | `3` | pass |
-| `length("\x00")` | `1` | pass |
-| all five string actions execute | `len` agrees with the planned value | pass |
-| `""` vs `"\x00"` stay distinct | `0` and `1` | pass |
-| executed cases are the planned ones | `{False, True}` | pass |
-| real builtin `ValueError` | `exception_builtin=True`, module `builtins` | pass |
-| custom class *named* `ValueError` | `exception_builtin=False`, no builtin lineage | pass |
-| genuine subclass of the builtin | builtin present in lineage | pass |
-| unrelated exception | no `ValueError` in lineage | pass |
-| hostile module/class names | clipped to 200 characters | pass |
-| hostile exception message | clipped to 4096 characters | pass |
-| cleanup after all runs | no container survives | pass |
+```text
+run 1: tests/test_execution_integration.py::TestCleanup::test_result_documents_never_reach_the_container_stdout
+       → TIMEOUT instead of RETURNED
+run 2: tests/test_shrink_integration.py::TestDFailureSignatureChanges::test_a_trial_with_a_different_failure_is_rejected
+       → TIMEOUT instead of the expected verdict
+```
 
-Two real-Docker oracle tests failed mid-session and the cause was the documented
-stale-image trap, not a defect: `edgehunter-runtime:1` had been built before the
-worker edit. `docker image rm edgehunter-runtime:1` followed by a rebuild made
-both pass. This is a session fact worth keeping: **after editing
-`runtime/worker.py`, remove the cached image or the integration tests silently
-test the old worker.**
+Both are Docker container timeouts under the load of ~1200 back-to-back tests, and
+both reproduce as passing in isolation. Neither was confirmed to be caused by
+this phase: the second is in `test_shrink_integration.py`, which this phase did
+not touch, and `test_result_documents_never_reach_the_container_stdout` exercises
+the `run` command, which was not modified. Splitting the run into the two halves
+above makes both halves deterministic. **Running `pytest -q` as a single command
+is not currently reliable on this host.**
 
-Manual CLI verification on a bool/str demo module: `--annotations` shows
-`flag: bool -> BOOL` and `value: str -> STR`; `--plans` shows
-`flag = True [adversarial_action, positional]` beside
-`name = "" [static_type_baseline, positional]` with
-`status: complete_function`; a NUL action prints as `"\x00"` and a Unicode action
-as `"\xe9\u6f22\U0001f642"`; the long string prints as a prefix plus
-`... (1026 chars)`. All five scan flags and the combined form exit `0`, and a
-plain `scan` remains static.
+Real-Docker integration (`tests/test_search_integration.py`, 10 passed, 51.56s) —
+Tests A through H from the phase brief:
+
+| Case | Outcome |
+|---|---|
+| A — every in-domain probe matches a correct target | 0 mismatches, 0 reproduced, no bug claim |
+| B — feedback finds and reproduces a nearby violation | `-1` MATCH → `-2` MISMATCH → recheck MISMATCH → `violation_reproduced` |
+| B — `-2` is not hardcoded | selected action is `source_boundary_at` / `static_source_boundary`, reason contains `x == -2` |
+| C — static baseline, same snapshot and budget | reproduced at probe 3 vs probe 2 |
+| D — out-of-domain start value | `refused`, 0 executions, no container created |
+| E — unavailable sandbox (monkeypatched) | `sandbox_unavailable`, 0 executions, no fallback |
+| F — contract bound to changed source | `refused`, 0 executions, no container created |
+| G — all probes share one staged snapshot | every step's fingerprint equals the analyzed digest |
+| H — cleanup after success, finding, and budget stop | container list identical before and after |
+| H — sandbox flags unchanged | all eight hardening flags present, no docker.sock, read-only mounts |
+
+Test F (flaky target) is covered by unit tests with a fabricated runner
+(`test_a_mismatch_then_a_match_is_flaky_not_a_finding`,
+`test_a_mismatch_then_a_different_exception_is_not_the_same_failure`) rather than
+by a deliberately flaky container, per the brief's allowance.
 
 ## 8. Known Issues / Risks
 
-- Docker reduces risk; it does not eliminate it. Container escapes have existed.
-- The nonce-checked result document proves the document belongs to one request. It
-  does **not** prove a deliberately hostile target could not have influenced the
-  worker process that produced it. A target is also not prevented from reporting a
-  misleading `__module__` or `__qualname__` for its own exception class. This is
-  unchanged from Phase 6B and was not weakened here.
-- Custom *expected* exception identity is still unresolved. A qualified observed
-  name is good evidence and nothing more; the test module's own import resolution
-  is still not performed, so a qualified expectation against a custom observation
-  stays `INCONCLUSIVE`.
-- Test-local shadowing is detected only for module-scope bindings. A
-  function-local `from x import Y` beside `pytest.raises(Y)` is not detected.
-- The worker image is cached, so an edited worker is not seen by the integration
-  tests until `docker image rm edgehunter-runtime:1` is run. This produced two
-  false failures during the session.
-- Method receivers are never constructed, so method targets are refused with
-  `NEEDS_RECEIVER`.
-- Framework fixtures are never executed; an expectation using one is `UNSUPPORTED`.
-- Production assertion preconditions are not generalized: an `AssertionError` on
-  an invalid-input path is `ASSERTION_OBSERVED`, review required.
-- Guard reachability is not analyzed, so a returning value is never called a guard
-  violation.
-- Arbitrary runtime objects remain opaque, so their comparisons are `UNSUPPORTED`.
-- Symlink refusal is unit-tested but the test skips on this host.
-- A timeout kills the container without explaining what the target was doing.
-- Captured output is truncated and native fd writes are discarded, so the capture
-  is a sample, not a transcript.
-- Action, case, plan, and strategy counts are now higher on repositories with
-  `bool` or `str` parameters. That is coverage, not defect count, and no metric
-  is a bug estimate.
+1. **Monolithic `pytest -q` is flaky on this host.** One Docker container timeout
+   per ~10-minute run, a different pre-existing test each time. See §7. This is
+   not a Phase 7C regression but it will confuse a future session; splitting the
+   run by `-m integration` avoids it.
+2. **One fixture is not a benchmark.** The feedback policy reproduced a
+   contradiction in 2 distinct probes where the static baseline took 3. That is
+   one observation on one fixture. No percentage, no general claim, and none is
+   supported.
+3. **The phase-specific neighbourhood is narrow by design.** One integer
+   parameter, one inequality, one expected builtin exception, one changed
+   parameter at a time. No strings, collections, floats, or multiple parameters.
+4. **Midpoint verdicts carry no information about the values between.** The
+   generator says so in every reason string, but the limitation is structural:
+   a verdict at a midpoint says nothing about the half-interval around it.
+5. **The candidate universe is static per search.** Feedback reorders what was
+   already generated; it cannot add an action that was not in the universe at the
+   start. That is a deliberate bound, but it means the policy can never widen its
+   own reach.
+6. **Phase 2's boundary miner still keeps signed literals symbolic.** Phase 7C
+   reads the comparisons back (D-096) rather than changing Phase 2. Any other
+   consumer of `TargetBoundaries` still does not see `-2`.
+7. **The worker image is cached.** After editing `runtime/worker.py` an old
+   `edgehunter-runtime:1` still contains the previous worker; `docker image rm
+   edgehunter-runtime:1` forces a rebuild. This phase did not edit the worker, so
+   the risk was not triggered, but the next phase that does must remember it.
 
 ## 9. Unfinished Work
 
-Nothing in the Phase 7A scope is unfinished. Both objectives are implemented,
-tested, and verified against a real Docker daemon. Deliberately out of scope:
+Nothing in the Phase 7C scope is unfinished. Deliberately deferred:
 
-- counterexample search over the deterministic candidate space
-- failure shrinking and minimization
-- adaptive neighborhood search and any learned policy
-- corpus-scale validation against real repositories
-- resolution of custom *expected* exception classes (import resolution)
-- guard reachability analysis
-- framework fixture execution
+- a learned policy and any model training (D-098's `SearchPolicy` protocol is the
+  seam)
+- an empirical benchmark corpus and action-effectiveness evaluation
+- multi-type semantic neighbourhoods
+- broader oracle extraction and framework-specific invocation support
+- automatic shrinking from a discovered contradiction (D-109 keeps them separate)
 
 ## 10. Next Subphase
 
-The natural next phase is **Phase 7B — shrinkability contracts and conservative
-counterexample minimization**. The deterministic candidate space is now larger and
-reaches `bool` and `str` targets, so there is something to minimize.
+**Phase 8 — Search Evaluation Harness + Benchmark Corpus**
 
-**The correctness constraint it must honour, recorded in D-077:** an exact test
-expectation does not automatically remain applicable after an input is changed.
-`assert f(100) == 200` cannot be applied to `f(10)` merely because `10` is
-smaller. A shrinker must therefore either preserve applicable oracle semantics or
-explicitly refuse to shrink. Concretely, a shrinking step must not:
+The natural next step is not a better policy but the ability to *measure* one.
+The phase's own numbers show why: a single fixture cannot tell a good policy from
+a lucky one.
 
-- reuse a `MATCH`/`MISMATCH` verdict recorded for a different input,
-- turn an `INCONCLUSIVE` into a verdict by shrinking away the evidence that made
-  it inconclusive,
-- break D-062's snapshot verification, so every attempt is measured against the
-  same staged bytes,
-- break D-064's reconciliation, so a conflict stays a conflict after shrinking,
-- report a shrunken input whose contradiction was never re-established.
+Expected shape:
 
-The honest maximum for a shrinker here is: reduce an input only while the
-applicable oracle is re-evaluated against the new input and still applies, and
-refuse the shrink otherwise.
+- a harness that runs both policies across many real targets under matched
+  budgets and records the measurement fields D-105 already defines
+- a corpus built from *permissively licensed* repositories, or from the project's
+  own fixtures, with every contract written by hand and bound to a real digest
+- per-fixture results plus an aggregate, reported as counts of probes and
+  containers — never as a coverage figure, a probability, or a percentage that
+  the corpus cannot support
+- the discipline D-110 already established: if the feedback policy does not win
+  on a fixture, that is recorded too
 
-Two smaller honest gaps remain worth doing before or alongside it:
-
-- function-local shadowing detection for raised exception names
-- a decision on whether the `INCONCLUSIVE` custom-exception cases can ever be made
-  decidable without importing target code, or should be documented as permanent
-
-Also worth re-running on an elevated host: `test_symlink_is_refused_and_not_followed`,
-so it stops being a skip.
+The `SearchPolicy` protocol from D-093 is the insertion point for a learned policy
+once there is a corpus to measure it against.
 
 ## 11. Critical Context
 
-- Repo `edgehunter`, branch `main`, remote `origin` -> `PrathamKapoor/Faultline`.
-  Published as a public snapshot; do not force-push over it.
-- Python 3.10+; the venv is `.venv`. Run gates as
-  `.venv\Scripts\python.exe -m pytest -q`, `-m ruff check .`,
-  `-m ruff format --check .`, `-m mypy`.
-- Docker must be running with a Linux engine: `docker version --format
-  '{{.Server.Os}}'` must print `linux`. Integration tests **skip** when it does
-  not, which means a skipped run is a partial verification, not a pass. Docker
-  Desktop is installed at `C:\Program Files\Docker\Docker\Docker Desktop.exe`; if
-  the daemon is down, start it and wait for `docker version` to report `linux`.
-- **After any edit to `runtime/worker.py`, run `docker image rm
-  edgehunter-runtime:1`** or the integration tests will exercise the previous
-  worker. Changing `runtime/Dockerfile` has the same effect.
-- The build context is the directory containing the `edgehunter` package, never
-  the scanned repository.
-- `evaluation/` must stay pure. The safety suite fails if any module in it gains
-  an execution primitive, imports `execution.docker` or the worker, or builds its
-  own literal grammar with `ast.parse`/`json.loads`.
-- `pipeline.py` must not import `evaluation`. A safety test asserts it.
-- `check_relative_path` must keep both the POSIX and Windows readings.
-- `run` deliberately never exits `1`, and `--evaluate` does not change that.
-- Every `docker run` hardening argument in `execution/docker.py` must stay. That
-  file was not touched in Phase 7A.
-- `render_string_literal()` in `generation/materialize.py` is the only rendering
-  for string values. `cli.py::_display_text()` is display-only. Adding a second
-  spelling in any layer reintroduces the duplicate-row defect D-072 fixed.
-- `is_string_action()` / `is_collection_action()` are the shape predicates
-  `_annotation_action` dispatches on.
-- The evaluator compares decoded protocol values. If a comparison appears to need
-  a target object, the answer is `UNSUPPORTED`, not a host-side comparison.
-- `mypy` runs over `src` and `tests` in strict mode.
-- `.edgehunter/` is Git-ignored; never commit a generated evaluation artifact.
+**The starting repository state did not match the brief.** Recorded here because
+the discrepancy is itself a finding:
+
+- The brief stated "Working tree is clean" alongside "git status shows modified
+  production files and new shrink sources". Both cannot be true.
+- `git status` showed 10 modified tracked files and `src/edgehunter/shrink/` plus
+  five shrink test files **untracked**. Phase 7B was uncommitted.
+- `handoff.md` described **Phase 7A** ("Action Coverage Repair + Exception
+  Identity Hardening"), not Phase 7B. It had never been rewritten for 7B.
+- HEAD was `8519c75`, "Record the Phase 7A commit hash and rewrite the session
+  handoff". **No Phase 7B commit existed**, so the brief's request to "verify
+  the actual Phase 7B commit hashes" could not be satisfied — there were none to
+  verify, and none were invented.
+- The brief's baseline of `1066 passed, 1 skipped` was not reproducible. Observed:
+  `1008 passed, 59 skipped`, because the Docker daemon was down.
+- The brief's expected version `0.1.0` was correct, and remains so.
+
+Resolution: the uncommitted Phase 7B work was preserved and committed as
+`bd7b46c` (not overwritten, reset, or stashed); Docker Desktop was started to
+obtain the Linux daemon; the real baseline was then measured.
+
+**Reusable APIs this phase depends on** — do not reimplement any of them:
+
+| Need | Existing function |
+|---|---|
+| contract parsing | `shrink.contract.read_contract_file()` |
+| all static gates | `shrink.repository.preflight_contract()` |
+| domain applicability | `shrink.domain.IntegerDomain.contains()` |
+| domain anchor | `shrink.domain.IntegerDomain.closest_to_zero()` |
+| contract verdict | `shrink.repository.evaluate_against_contract()` |
+| failure signature | `shrink.signature.signature_of()` |
+| typed request for one integer | `shrink.repository._seed_request()` |
+| one snapshot-fixed session | `execution.repository.open_session()` / `ExecutionSession` |
+| snapshot verification | `evaluation.repository.SourceSnapshot.verify()` |
+| infrastructure classification | `evaluation.evaluator.is_infrastructure_outcome()` |
+| exception identity | `evaluation.exceptions.match_exception_observed()` |
+| operator inversion | `analysis.models.invert_comparison_operator()` |
+| integer literal parsing | `generation.materialize.parse_integer_literal()` |
+| artifact run-id sanitizing | `evaluation.repository._safe_run_id()` |
+
+**Things that look wrong but are deliberate:**
+
+- `SearchAction.semantic_action` is always `None` today. The field exists so a
+  genuine Phase 5 action keeps its identity; reporting a search-derived midpoint
+  as an action-layer proposal would be false provenance.
+- `_seed_request` is imported despite the leading underscore. It is the one place
+  that turns an integer into a typed protocol value; copying it would let a
+  search input arrive as evaluated text.
+- `preflight_contract` is a thin public wrapper around a private function rather
+  than a rename, so Phase 7B's own tests and call sites keep working.
+- The static policy still reproduces findings. It is a baseline for *ordering*,
+  not for strictness.
 
 ## 12. Agent Instructions
 
-- Read `decisions.md`, `flow.md`, and this file fully before changing anything.
-- Append decisions in the established format. Every bug fix needs `Symptom`,
-  `Root cause`, and `Regression test`. Mark superseded decisions explicitly.
-- Update `flow.md` with real module, function, and file names as the code changes.
-- The central rule of this project is that an observation is not a judgement. The
-  Phase 7A sharpening makes this harder, not easier: a *more precise* observation
-  is exactly when a careless reader will start treating it as proof. If a change
-  makes an exception look more like a bug without adding evidence, it is wrong.
-- Never turn a richer observation into a match. "The names now include a module"
-  is not a licence to resolve a custom expected class, and D-075's ladder exists
-  to make that refusal structural rather than a matter of care.
-- Never report an exception as a finding on its own. Never convert a structural
-  risk score into severity. Never add a severity field or a confidence number.
-- Never weaken an isolation property to make a test pass, and never add a host
-  execution fallback. A failing refusal test is a finding about the code, not
-  about the test.
-- More candidate coverage is not success if those candidates cannot execute
-  safely. Verify new actions through the real Docker backend, not only through a
-  static scan.
-- Prefer `INCONCLUSIVE`, `UNSUPPORTED`, or `NOT_APPLICABLE` over a verdict the
-  evidence does not support. A small number of well-evidenced counterexamples is
-  the entire point of this project.
-- If you change an existing test's expectation, record the test name, the old and
-  new expectations, why the old one was wrong, and the independent evidence. Never
-  adjust a count to match what the code happened to produce.
-- Verify with evidence before claiming completion: run the gates, read the
-  output, and quote the numbers. A skipped Docker test means the phase is
-  partial.
-- Commit as PrathamKapoor only. No AI attribution in commits, branches, tags,
-  PRs, or release notes.
-- Do not commit `paper/`, `research/`, or `*.tex`.
+- Read `decisions.md`, `flow.md`, and this file completely before changing code.
+  D-093 through D-110 are authoritative for the search package.
+- Verify the working tree before assuming anything. The Phase 7B incident in §11
+  happened because a written claim was trusted over `git status`.
+- Run the suite in two halves, not one command:
+
+  ```powershell
+  .venv\Scripts\python.exe -m pytest -q -m "not integration"
+  .venv\Scripts\python.exe -m pytest -q -m integration
+  ```
+
+  A single `pytest -q` is flaky on this host (§8). A single failure in the
+  monolithic run is not evidence of a regression; re-run the test in isolation
+  and check whether this phase touched that path.
+- Start Docker Desktop if the daemon is unreachable. It is installed; it is not
+  running by default. Never delete unrelated Docker images or containers.
+- If you edit `runtime/worker.py`, run `docker image rm edgehunter-runtime:1`
+  before the integration tests or they will exercise the previous worker.
+- Do not add a policy that can reproduce findings differently from another
+  policy (D-099). Do not give one policy a larger budget (D-101). Do not reorder
+  the static baseline after seeing a result (D-097, D-110).
+- Do not add a domain check in only one of the three places D-103 names.
+- Do not add a coverage, probability, confidence, or severity field. If it
+  cannot be counted, omit it (D-105).
+- Do not report a single fixture as general superiority. Print the numbers and
+  say what they are (D-110).
+- Do not modify `execution/docker.py` unless a verified defect requires it, and
+  document and test any such change separately.
+- Keep `scan` static and unchanged. `scan` must never import `shrink` or `search`.
+- Commit only as `PrathamKapoor <prathamkapoor027@gmail.com>`, with no co-author
+  or attribution trailers. Never stage `paper/`, `research/`, or `*.tex`.
+- Append a decision to `decisions.md` for every architectural change, update
+  `flow.md` with real function names, and use `uncommitted` until a hash exists.
