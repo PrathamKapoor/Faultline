@@ -651,6 +651,21 @@ def _preflight(
     return contract, contract_sha, target_ref, function
 
 
+def preflight_contract(
+    scan: RepositoryScan, request: ShrinkRequest
+) -> tuple[Contract, str, TargetRef, FunctionInfo] | ShrinkResult:
+    """Run the shared static gates and return either the prepared tuple or a refusal.
+
+    Public so another input-changing operation -- semantic neighborhood search --
+    can be bound by exactly the same checks instead of restating them. There is
+    one contract parser, one target-shape check, one fingerprint comparison, and
+    one conflict detector in this project; a second copy of any of them would
+    eventually disagree with the first.
+    """
+
+    return _preflight(scan, request)
+
+
 def _shrink_with_runner(
     scan: RepositoryScan, request: ShrinkRequest, runner: AttemptRunner
 ) -> ShrinkResult:

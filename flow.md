@@ -1003,22 +1003,244 @@ write_shrink_artifact(result, contract_sha, run_id)   shrink/repository.py
 
 | Area | Change | Files | Commit | Decision |
 |---|---|---|---|---|
-| evaluation | Corrected the legacy name-only exception fallback: an observation with no builtin-identity evidence is now `INCONCLUSIVE` in both directions, closing a false `MATCH` and a false `MISMATCH` | src/edgehunter/evaluation/exceptions.py | uncommitted | D-078 |
-| evaluation | Exposed `is_infrastructure_outcome()` so another evaluator-like surface reuses the one classification instead of restating the set | src/edgehunter/evaluation/evaluator.py | uncommitted | D-087 |
-| shrink | Added the `shrink` package with the typed vocabulary: `ShrinkabilityKind`, `ShrinkStatus`, `AttemptOutcome`, `InvocationOrigin`, `OracleSource`, `ShrinkPolicy`, `ShrinkAttempt`, `ShrinkResult` | src/edgehunter/shrink/models.py, src/edgehunter/shrink/__init__.py | uncommitted | D-079, D-089 |
-| shrink | Added the shrinkability assessment: exact test expectations and production properties are refused, unresolved/ambiguous/custom-exception evidence is inconclusive, and only an explicitly selected contract is reusable | src/edgehunter/shrink/shrinkability.py | uncommitted | D-079, D-080 |
-| shrink | Added the versioned JSON contract reader with strict version and key allowlists, duplicate-key refusal, a 32 KiB bound, SHA-256 validation, signed-64-bit decimal-string integers, and the existing path checker for targets | src/edgehunter/shrink/contract.py | uncommitted | D-081, D-082 |
-| shrink | Added the pure integer domain with four operators and a four-case `closest_to_zero()`, and the deterministic anchor-then-midpoint proposal generator under the `abs(value)` metric | src/edgehunter/shrink/domain.py, src/edgehunter/shrink/proposals.py | uncommitted | D-083, D-084 |
-| shrink | Added the failure signature: outcome category plus the observed exception's qualified identity and builtin flag, with infrastructure outcomes having none | src/edgehunter/shrink/signature.py | uncommitted | D-085 |
-| execution | Split `_execute_one` so `_run_request` is the single container runner, and added `ExecutionSession`/`open_session()` for a snapshot fixed across a whole operation | src/edgehunter/execution/repository.py | uncommitted | D-087 |
-| shrink | Added the orchestrator: shared preflight, contract adapter, seed reproducibility gate, bounded proposal loop, per-candidate acceptance, and a structured result | src/edgehunter/shrink/repository.py | uncommitted | D-079, D-085, D-086, D-088 |
-| evaluation | Extracted `_safe_run_id()` so both artifact writers sanitize a run id identically | src/edgehunter/evaluation/repository.py | uncommitted | D-090 |
-| CLI | Added the `shrink` command with explicit contract selection, seed, and authorization; provenance and bounded-search wording are always printed; exit `1` stays reserved | src/edgehunter/cli.py | uncommitted | D-089 |
-| shrink | Added the versioned evidence artifact excluding captured output and exception messages | src/edgehunter/shrink/repository.py | uncommitted | D-090 |
-| tests | Added the shrinkability suite including the exact-oracle core invariant, with the attempt runner spied on to prove nothing was executed | tests/test_shrink_shrinkability.py | uncommitted | D-079 |
-| tests | Added the contract, domain, and proposal suite covering validation refusals, all four operators, boundary equality, and proposal determinism | tests/test_shrink_contract.py | uncommitted | D-081, D-083, D-084 |
-| tests | Added the acceptance, failure-signature, budget, reproduction, no-host-execution, and artifact suites driven by a fabricated attempt runner | tests/test_shrink_search.py | uncommitted | D-085, D-086, D-088, D-090 |
-| tests | Added the shrink CLI suite covering every refusal, the reserved exit code, and that `scan` and `run` are unchanged | tests/test_shrink_cli.py | uncommitted | D-089 |
-| tests | Added real-Docker integration for negative and positive domains, a correct implementation, a changed failure signature, a snapshot mismatch, an unavailable sandbox, cleanup, and a real budget | tests/test_shrink_integration.py | uncommitted | D-085, D-086, D-087 |
-| tests | Updated six existing tests whose expectations encoded the unsound name-only fallback, to supply realistic worker identity evidence instead | tests/test_evaluation_verify.py, tests/test_evaluation_exception_identity.py | uncommitted | D-078 |
-| docs | Recorded D-078 through D-091 and this flow section | decisions.md, flow.md | uncommitted | D-078..D-091 |
+| evaluation | Corrected the legacy name-only exception fallback: an observation with no builtin-identity evidence is now `INCONCLUSIVE` in both directions, closing a false `MATCH` and a false `MISMATCH` | src/edgehunter/evaluation/exceptions.py | bd7b46c | D-078 |
+| evaluation | Exposed `is_infrastructure_outcome()` so another evaluator-like surface reuses the one classification instead of restating the set | src/edgehunter/evaluation/evaluator.py | bd7b46c | D-087 |
+| shrink | Added the `shrink` package with the typed vocabulary: `ShrinkabilityKind`, `ShrinkStatus`, `AttemptOutcome`, `InvocationOrigin`, `OracleSource`, `ShrinkPolicy`, `ShrinkAttempt`, `ShrinkResult` | src/edgehunter/shrink/models.py, src/edgehunter/shrink/__init__.py | bd7b46c | D-079, D-089 |
+| shrink | Added the shrinkability assessment: exact test expectations and production properties are refused, unresolved/ambiguous/custom-exception evidence is inconclusive, and only an explicitly selected contract is reusable | src/edgehunter/shrink/shrinkability.py | bd7b46c | D-079, D-080 |
+| shrink | Added the versioned JSON contract reader with strict version and key allowlists, duplicate-key refusal, a 32 KiB bound, SHA-256 validation, signed-64-bit decimal-string integers, and the existing path checker for targets | src/edgehunter/shrink/contract.py | bd7b46c | D-081, D-082 |
+| shrink | Added the pure integer domain with four operators and a four-case `closest_to_zero()`, and the deterministic anchor-then-midpoint proposal generator under the `abs(value)` metric | src/edgehunter/shrink/domain.py, src/edgehunter/shrink/proposals.py | bd7b46c | D-083, D-084 |
+| shrink | Added the failure signature: outcome category plus the observed exception's qualified identity and builtin flag, with infrastructure outcomes having none | src/edgehunter/shrink/signature.py | bd7b46c | D-085 |
+| execution | Split `_execute_one` so `_run_request` is the single container runner, and added `ExecutionSession`/`open_session()` for a snapshot fixed across a whole operation | src/edgehunter/execution/repository.py | bd7b46c | D-087 |
+| shrink | Added the orchestrator: shared preflight, contract adapter, seed reproducibility gate, bounded proposal loop, per-candidate acceptance, and a structured result | src/edgehunter/shrink/repository.py | bd7b46c | D-079, D-085, D-086, D-088 |
+| evaluation | Extracted `_safe_run_id()` so both artifact writers sanitize a run id identically | src/edgehunter/evaluation/repository.py | bd7b46c | D-090 |
+| CLI | Added the `shrink` command with explicit contract selection, seed, and authorization; provenance and bounded-search wording are always printed; exit `1` stays reserved | src/edgehunter/cli.py | bd7b46c | D-089 |
+| shrink | Added the versioned evidence artifact excluding captured output and exception messages | src/edgehunter/shrink/repository.py | bd7b46c | D-090 |
+| tests | Added the shrinkability suite including the exact-oracle core invariant, with the attempt runner spied on to prove nothing was executed | tests/test_shrink_shrinkability.py | bd7b46c | D-079 |
+| tests | Added the contract, domain, and proposal suite covering validation refusals, all four operators, boundary equality, and proposal determinism | tests/test_shrink_contract.py | bd7b46c | D-081, D-083, D-084 |
+| tests | Added the acceptance, failure-signature, budget, reproduction, no-host-execution, and artifact suites driven by a fabricated attempt runner | tests/test_shrink_search.py | bd7b46c | D-085, D-086, D-088, D-090 |
+| tests | Added the shrink CLI suite covering every refusal, the reserved exit code, and that `scan` and `run` are unchanged | tests/test_shrink_cli.py | bd7b46c | D-089 |
+| tests | Added real-Docker integration for negative and positive domains, a correct implementation, a changed failure signature, a snapshot mismatch, an unavailable sandbox, cleanup, and a real budget | tests/test_shrink_integration.py | bd7b46c | D-085, D-086, D-087 |
+| tests | Updated six existing tests whose expectations encoded the unsound name-only fallback, to supply realistic worker identity evidence instead | tests/test_evaluation_verify.py, tests/test_evaluation_exception_identity.py | bd7b46c | D-078 |
+| docs | Recorded D-078 through D-091 and this flow section | decisions.md, flow.md | bd7b46c | D-078..D-091 |
+## 20. Semantic neighborhood search rules (`src/edgehunter/search/`)
+
+`edgehunter explore` is the first command whose **next input** depends on what the
+previous input did. `shrink` walks a counterexample *towards zero*; `explore` walks
+*away from what has already been observed*. Everything below is real call order.
+
+### 20.1 The loop, in one picture
+
+```text
+candidate universe (finite, in-domain, deterministic)   search/actions.py
+        │
+        ├─ the previous probe's verdict is pending a recheck?
+        │     └─ yes ──► re-execute the identical request    search/repository.py
+        │
+        └─ no ──► policy.select(state, available)           search/policy.py
+                     │
+                     ├─ domain re-checked immediately before execution
+                     ├─ runner.execute_probe(action)          SessionProbeRunner
+                     ├─ evaluate_against_contract(...)        shrink/repository.py
+                     ├─ feedback_for(outcome, status)         search/models.py
+                     ├─ update_state(...)                     search/state.py
+                     └─ record_step(...)                      search/state.py
+                              │
+                              └─ repeat until a termination status
+```
+
+Three concepts are kept in separate modules and never merged: a **semantic
+action** is what input is proposed (`SearchAction`), a **search policy** is which
+available action comes next (`select`), and **execution feedback** is what
+happened (`SearchFeedback`, derived from the existing evaluator).
+
+### 20.2 Static gates, before any container
+
+```text
+explore_integer(scan, root, request, authorized, ...)       search/repository.py
+ ├─ _run_static_gates(scan, request)
+ │   ├─ contract_path is None ──────────────► REFUSED
+ │   │     "an exact-input test expectation cannot authorize changing an input"
+ │   └─ preflight_contract(scan, ShrinkRequest(...))        shrink/repository.py
+ │        ├─ read_contract_file + select                   shrink/contract.py
+ │        ├─ exactly one analyzed callable                 D-052 rules
+ │        ├─ narrow supported target shape                 D-079 rules
+ │        ├─ analyzed digest == contract.source_sha256     D-062 rules
+ │        ├─ start value in range and inside the domain    D-083 rules
+ │        └─ conflicting applicable expectation ──────────► CONFLICTING_EVIDENCE
+ ├─ enumerate_search_actions(SearchContext(...))           search/actions.py
+ │    └─ empty ───────────────────────────────────────────► NO_REPRODUCED_VIOLATION
+ └─ open_session(root, authorized, ...)                    execution/repository.py
+      ├─ not authorized ───────────────────────────────────► REFUSED
+      ├─ no Linux daemon ──────────────────────────────────► SANDBOX_UNAVAILABLE
+      └─ _stage_workspace(...) ONCE, for the whole search
+           └─ SourceSnapshot.verify(...) ─────────────────► INCONCLUSIVE if unverified
+```
+
+There is one contract parser, one target resolver, one shape check, one
+fingerprint comparison, and one conflict detector in the project; all of them are
+Phase 7B's, reached through `preflight_contract()`.
+
+### 20.3 Candidate generation (`search/actions.py`)
+
+Pure integer arithmetic. No file is read, no code is run, no condition string is
+evaluated.
+
+```text
+anchor          IntegerDomain.closest_to_zero()            shrink/domain.py  (reused)
+                lt: c<=0 ? c-1 : 0      le: c<0 ? c : 0
+                gt: c<0  ? 0  : c+1     ge: c<=0 ? 0 : c
+
+offer(anchor)            CONTRACT_ANCHOR      / CONTRACT_BOUNDARY
+offer(start)             USER_SEED           / USER_SUPPLIED_SEED   (if distinct)
+offer(mined boundary)    SOURCE_BOUNDARY_{AT,BELOW,ABOVE} / STATIC_SOURCE_BOUNDARY
+offer(mined comparison)  SOURCE_BOUNDARY_{AT,BELOW,ABOVE} / STATIC_SOURCE_BOUNDARY
+offer(seed ± 1)          STEP_{TOWARD,AWAY}_FROM_ZERO / SEARCH_NEIGHBOR
+offer(floor midpoints)   MIDPOINT_TO_ANCHOR  / SEARCH_MIDPOINT      (≤ 6, stops on no progress)
+offer(anchor/seed ± 1)   INTEGER_NEIGHBOR_{BELOW,ABOVE} / SEARCH_NEIGHBOR
+
+offer() dedupes by value and refuses anything context.admits(value) rejects
+result    sorted by static_order_key, truncated to budgets.bounded_candidates()
+priority  reassigned to the position in that sorted, truncated list
+```
+
+`admits()` applies both checks together — signed 64-bit range *and* the declared
+domain — so no call site can apply one and forget the other.
+
+A comparison is resolved only when one side is a bare parameter name
+(`ExpressionKind.NAME`) and the other is a plain signed integer literal, read
+with an explicit character test plus the generation layer's
+`parse_integer_literal()`. `-limit`, `-2 + 3`, `-x`, and a float produce nothing.
+
+### 20.4 The two policies (`search/policy.py`)
+
+```text
+STATIC_PRIORITY                         FEEDBACK_GUIDED
+min(available,                          if last_outcome is target-independent
+    SearchAction.static_order_key)           → stop
+(reads no feedback at all)              if CONFLICTING_EVIDENCE → stop
+                                         if EXPECTED_BEHAVIOR  →
+static_order_key                          min(available,
+  = (origin rank,                          SearchAction.distance_key(last.value))
+     action kind rank,
+     abs(value), value, identifier)       distance_key(reference)
+                                         = (abs(value - reference),
+                                            origin rank, kind rank, priority,
+                                            abs(value), value, identifier)
+                                       else  → min(available, static_order_key)
+```
+
+Both are pure functions of `(state, available)`. Neither imports target code,
+launches a container, evaluates an oracle, reads the clock, or uses randomness.
+
+### 20.5 Feedback mapping (`search/models.py::feedback_for`)
+
+```text
+observable outcome = RETURNED or RAISED
+infrastructure outcome (is_infrastructure_outcome) ──► INFRASTRUCTURE_FAILURE
+
+oracle MATCH      + observable ──► EXPECTED_BEHAVIOR
+oracle MISMATCH   + observable ──► EXPECTATION_MISMATCH
+oracle INCONCLUSIVE | NOT_APPLICABLE | ""  ──► INCONCLUSIVE
+oracle UNSUPPORTED ──► UNSUPPORTED
+oracle CONFLICTING_EVIDENCE ──► CONFLICTING_EVIDENCE
+```
+
+`is_evidence` is true for exactly the first two. A timeout can never produce a
+reward, in either direction.
+
+### 20.6 Reproduction, owned by the orchestrator
+
+```text
+NEW_PROBE + EXPECTATION_MISMATCH
+   └─ pending = PendingRecheck(action, probe_index, signature)   ── no policy involved
+
+next iteration: pending is not None ──► re-execute the identical request
+                                        (counts an execution, NOT a probe)
+
+judge:
+  not a mismatch, expected behaviour ─────► FLAKY_OBSERVATION
+  not a mismatch, anything else ──────────► INCONCLUSIVE
+  no comparable signature ───────────────► INCONCLUSIVE
+  signature does not match the original ──► INCONCLUSIVE  (different failure)
+  signature matches ──────────────────────► VIOLATION_REPRODUCED
+```
+
+Exactly one recheck per contradiction; the search always terminates afterwards.
+
+### 20.7 Budget accounting
+
+```text
+every runner.execute_probe(...)   ──► executions_consumed += 1
+                                     (including one that produced no observation)
+
+was the action already tested?    ──► recheck_executions += 1, probes_used unchanged
+otherwise                         ──► probes_used += 1
+
+checked before every selection, in order:
+  wall clock      reached ──► WALL_TIME_BUDGET_EXHAUSTED
+  executions      0 left ──► EXECUTION_BUDGET_EXHAUSTED
+  probes          0 left, no pending recheck ──► PROBE_BUDGET_EXHAUSTED
+policy returns None ──► SANDBOX_UNAVAILABLE | CONFLICTING_EVIDENCE | NO_REPRODUCED_VIOLATION
+```
+
+A pending recheck is exempt from the probe budget only. That is why a budget too
+small to confirm a mismatch returns `execution_budget_exhausted` with
+`first_reproduced_probe = None` and never a finding.
+
+### 20.8 Artifact and CLI
+
+```text
+.edgehunter/runs/<_safe_run_id(run_id)>/search.json     search/repository.py
+  schema_version, kind, target_identity, parameter, source_sha256,
+  snapshot_verified, oracle{id,source,contract_file_sha256,provenance},
+  policy, budgets{...}, candidate_universe{size,candidates[]},
+  trace[] {step, policy, action, action_identifier, parameter, input, origin,
+           use, selection_reason, execution_outcome, observation, oracle_status,
+           feedback, feedback_reason, reproduction, executions_consumed,
+           remaining_probes, remaining_executions},
+  measurements{...}, termination, reason, reproduced_value, meaning
+
+no captured stdout, no captured stderr, no exception message
+
+edgehunter explore PATH --target path.py::name --contract-file F --contract-id ID
+                      --start-int N [--policy static|feedback]
+                      [--max-probes 8] [--max-executions 12] [--timeout 3.0]
+                      [--artifact-id ID] --allow-execution
+
+exit 0  the bounded search completed with whatever result it produced
+exit 2  REFUSED — invalid input, including an out-of-domain or stale start
+exit 3  SANDBOX_UNAVAILABLE
+never 1 — reserved for "scan found issues"
+```
+
+### 20.9 What is never inferred
+
+- A contradiction is never reported after a single observation.
+- Two executions that disagree are never called a stable failure.
+- An infrastructure failure is never a reward, and never a target verdict.
+- A target-independent failure is never retried; a candidate-specific one is
+  never treated as a target verdict.
+- An out-of-domain value is never executed, whatever its provenance.
+- A search-derived midpoint is never reported as a Phase 5 semantic action.
+- An exhausted budget is never reported as exhaustive coverage.
+- One fixture's result is never reported as general superiority.
+- `explore` never shrinks, and `shrink` never searches.
+
+## Changes in this session (Phase 7C — Budgeted Adaptive Semantic Neighborhood Search)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| search | Added the `search` package with the typed vocabulary: `SearchActionKind`, `ProposalOrigin`, `SearchFeedback`, `SearchTermination`, `SelectionUse`, `PolicyName`, `SearchAction`, `SearchBudgets`, `SearchState`, `SearchStep`, `SearchResult`, `SearchSelection`, `feedback_for()` | src/edgehunter/search/models.py, src/edgehunter/search/__init__.py | bd7b46c | D-093, D-094, D-105, D-106 |
+| search | Added the pure candidate universe: contract anchor, user seed, mined boundaries and comparisons, bounded midpoint chain, integer neighbours; deduplicated, sorted, and truncated, with every value domain-checked before it is offered | src/edgehunter/search/actions.py | bd7b46c | D-095, D-096 |
+| search | Added `StaticPriorityPolicy` and `FeedbackGuidedPolicy` behind a `SearchPolicy` protocol, plus `policy_for()`; both pure, both fed the same universe and budgets | src/edgehunter/search/policy.py | bd7b46c | D-097, D-098, D-100 |
+| search | Added the immutable state transitions `update_state`, `note_first_mismatch`, `note_reproduced`, `record_step`, and `terminate` | src/edgehunter/search/state.py | bd7b46c | D-099, D-100, D-104 |
+| search | Added the orchestrator: shared preflight, one snapshot-fixed session, the causal loop, orchestrator-owned reproduction, budget accounting, ten stopping statuses, and the versioned evidence artifact | src/edgehunter/search/repository.py | bd7b46c | D-099, D-102, D-103, D-104, D-105, D-106, D-109 |
+| shrink | Exposed `preflight_contract()` publicly so the search reuses the one contract parser, target resolver, shape check, fingerprint comparison, and conflict detector | src/edgehunter/shrink/repository.py, src/edgehunter/shrink/__init__.py | bd7b46c | D-102 |
+| CLI | Added `explore` with explicit contract selection, a start value, `--policy static|feedback`, bounded `--max-probes`/`--max-executions`, and `--allow-execution`; prints the per-probe trace and only-counted measurements | src/edgehunter/cli.py | bd7b46c | D-107 |
+| docs | Documented `explore`, the candidate-generation rules, both policies, the reproduction requirement, the budgets, the stopping statuses, the artifact, the measurement semantics, and the one-fixture comparison | README.md | bd7b46c | D-110 |
+| tests | Added the candidate suite: anchors for all four operators, strict vs non-strict, explicit start, duplicate anchor/seed, in-domain and out-of-domain source boundaries, symbolic references, signed limits, the cap, determinism, provenance, and no expression execution | tests/test_search_candidates.py | bd7b46c | D-095, D-096 |
+| tests | Added the policy suite: the documented static order, all six feedback values ignored by the baseline, no repeated candidate, deterministic ties, budget accessors, the feedback transition table, and the mandatory adaptivity assertions | tests/test_search_policy.py | bd7b46c | D-097, D-098, D-099, D-100 |
+| tests | Added the loop suite: reproduced/flaky/inconclusive/signature-changed reproduction, every budget including "enough to see a mismatch but not to recheck", refusals proven by an empty spy runner, conflicting evidence, trace determinism, and artifact strictness | tests/test_search_loop.py | bd7b46c | D-099, D-102, D-103, D-104, D-105, D-106 |
+| tests | Added the CLI suite: authorization, policy spelling, every validation refusal, unchanged `scan`/`run`/`shrink`, and the reserved exit code | tests/test_search_cli.py | bd7b46c | D-107 |
+| tests | Added real-Docker integration: a correct target matches everywhere, the feedback policy reproduces a nearby contradiction, the static baseline under the same budget, an out-of-domain refusal, an unavailable sandbox, a stale fingerprint, one shared snapshot, and container cleanup | tests/test_search_integration.py | bd7b46c | D-101, D-110 |
+| docs | Recorded D-093 through D-110 and this flow section | decisions.md, flow.md | bd7b46c | D-093..D-110 |

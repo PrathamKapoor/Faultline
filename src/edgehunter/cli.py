@@ -32,6 +32,20 @@ from edgehunter.oracle.models import (
 from edgehunter.pipeline import RepositoryScan, analyze_repository
 from edgehunter.scanner import RepositoryAnalysis, ScanError
 from edgehunter.scanner.models import FunctionInfo
+from edgehunter.search import (
+    DEFAULT_MAX_EXECUTIONS as DEFAULT_SEARCH_MAX_EXECUTIONS,
+)
+from edgehunter.search import (
+    DEFAULT_MAX_PROBES,
+    ExploreRequest,
+    PolicyName,
+    SearchBudgets,
+    SearchResult,
+    SearchTermination,
+    SelectionUse,
+    explore_integer,
+    write_search_artifact,
+)
 from edgehunter.shrink import (
     DEFAULT_MAX_EXECUTIONS,
     DEFAULT_MAX_PROPOSALS,
@@ -357,6 +371,232 @@ def shrink(
     if result.status is ShrinkStatus.INCONCLUSIVE:
         raise typer.Exit(code=EXIT_EXECUTION_REFUSED)
     raise typer.Exit(code=EXIT_SHRINK_COMPLETED)
+
+
+@app.command()
+def explore(
+    path: Annotated[
+        Path,
+        typer.Argument(metavar="PATH", help="Directory containing the target to search around."),
+    ],
+    target: Annotated[
+        str,
+        typer.Option(
+            "--target",
+            help=(
+                "Target to search as 'relative/path.py::qualified_name'. Must match the "
+                "contract's bound target exactly."
+            ),
+        ),
+    ],
+    contract_file: Annotated[
+        Path,
+        typer.Option(
+            "--contract-file",
+            help=(
+                "JSON file of user-declared contracts. Never discovered automatically, and its "
+                "presence is never authorization: --allow-execution is still required."
+            ),
+        ),
+    ],
+    contract_id: Annotated[
+        str, typer.Option("--contract-id", help="Id of the one contract to search against.")
+    ],
+    start_int: Annotated[
+        int,
+        typer.Option(
+            "--start-int",
+            help=(
+                "Starting integer. Must satisfy the contract's declared domain; recorded as a "
+                "user-supplied seed, not as a discovered action."
+            ),
+        ),
+    ],
+    allow_execution: Annotated[
+        bool,
+        typer.Option(
+            "--allow-execution", help="Authorize running untrusted target code in Docker."
+        ),
+    ] = False,
+    policy: Annotated[
+        str,
+        typer.Option(
+            "--policy",
+            help=(
+                "'feedback' selects the next input from the previous verdict; 'static' selects it "
+                "from a fixed order that ignores runtime feedback. Both share one candidate "
+                "universe and one budget."
+            ),
+        ),
+    ] = "feedback",
+    max_probes: Annotated[
+        int,
+        typer.Option("--max-probes", help="Maximum distinct inputs to execute (bounded)."),
+    ] = DEFAULT_MAX_PROBES,
+    max_executions: Annotated[
+        int,
+        typer.Option(
+            "--max-executions",
+            help="Hard cap on total containers, including verification reruns (bounded).",
+        ),
+    ] = DEFAULT_SEARCH_MAX_EXECUTIONS,
+    timeout: Annotated[
+        float, typer.Option("--timeout", help="Per-invocation wall-clock budget in seconds.")
+    ] = 3.0,
+    artifact_id: Annotated[
+        str,
+        typer.Option(
+            "--artifact-id",
+            help="Write the evidence artifact under .edgehunter/runs/<id>/search.json.",
+        ),
+    ] = "",
+) -> None:
+    """Search around ONE integer input for a reproducible contract contradiction.
+
+    This is the first command whose next input depends on what the previous input
+    did. An exact test expectation still cannot drive it -- ``assert f(100) ==
+    200`` says nothing about ``f(10)`` -- so a search requires an explicitly
+    selected user-declared contract, a starting integer inside that contract's
+    domain, and ``--allow-execution``.
+
+    The search is bounded, deterministic, and snapshot-fixed, and it reports the
+    smallest number of probes it actually used rather than any claim about how
+    good the policy is. A reproduced contradiction is a reproduced contradiction
+    of one user declaration; it is not a confirmed defect, and a search that
+    found nothing is not a statement that the target is correct.
+    """
+    if not allow_execution:
+        typer.secho(
+            "error: searching requires explicit authorization; pass --allow-execution",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_EXECUTION_REFUSED)
+
+    try:
+        analysis = analyze_repository(path)
+    except ScanError as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_INVALID_INPUT) from exc
+
+    try:
+        policy_name = PolicyName.parse(policy)
+    except ValueError as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_INVALID_INPUT) from exc
+
+    budgets = SearchBudgets(max_probes=max_probes, max_executions=max_executions)
+    request = ExploreRequest(
+        contract_path=contract_file,
+        contract_id=contract_id,
+        start_value=start_int,
+        target_spec=target,
+        policy_name=policy_name,
+        budgets=budgets,
+        timeout_seconds=timeout,
+    )
+    try:
+        result = explore_integer(
+            analysis,
+            path if path.is_dir() else path.parent,
+            request,
+            authorized=True,
+            repository_context=runtime_context(),
+        )
+    except ExecutionRefused as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_EXECUTION_REFUSED) from exc
+
+    _print_search(result)
+
+    if artifact_id:
+        try:
+            written = write_search_artifact(result, run_id=artifact_id)
+        except (OSError, ValueError) as exc:
+            typer.secho(f"error: the artifact could not be written: {exc}", fg=typer.colors.RED)
+        else:
+            typer.echo("")
+            typer.echo(f"Evidence artifact: {written.as_posix()}")
+
+    # A missing contract, a bad fingerprint, an out-of-domain start value, or an
+    # ineligible target is invalid user input. An unavailable backend is a
+    # refusal to execute. Neither is ever reported as a search result.
+    if result.termination is SearchTermination.REFUSED:
+        raise typer.Exit(code=EXIT_INVALID_INPUT)
+    if result.termination is SearchTermination.SANDBOX_UNAVAILABLE:
+        raise typer.Exit(code=EXIT_EXECUTION_REFUSED)
+    raise typer.Exit(code=EXIT_SHRINK_COMPLETED)
+
+
+def _print_search(result: SearchResult) -> None:
+    """Print one search result: what was tried, why, and what it does not mean."""
+
+    typer.echo("EdgeHunter explore")
+    typer.echo("")
+    typer.echo("  Budgeted semantic neighborhood search around one integer input.")
+    typer.echo("  The contract is an expectation you assert, not a proven fact.")
+    typer.echo("")
+    typer.echo(f"  Target:          {result.target_identity or '(unresolved)'}")
+    typer.echo(f"  Contract:        {result.contract_id or '(none)'}")
+    typer.echo("  Oracle source:   user_declared_contract")
+    typer.echo(f"  Parameter:       {result.parameter or '(none)'}")
+    typer.echo(f"  Policy:          {result.policy.value}")
+    typer.echo(f"  Source snapshot: {'verified' if result.snapshot_verified else 'not verified'}")
+    typer.echo(
+        f"  Budget:          {result.budgets.bounded_probes()} distinct probes, "
+        f"{result.budgets.bounded_executions()} total executions, "
+        f"{result.budgets.bounded_wall_clock()}s wall clock"
+    )
+    typer.echo("")
+
+    for step in result.steps:
+        use = "recheck" if step.use is SelectionUse.VERIFICATION_RERUN else "probe"
+        typer.echo(
+            f"  Step {step.step} ({use})  {step.action.kind.value}  "
+            f"{step.action.parameter} = {step.action.value}"
+        )
+        typer.echo(f"    Origin:   {step.action.origin.value}")
+        typer.echo(f"    Why:      {step.selection_reason}")
+        typer.echo(f"    Observed: {step.observation_description}")
+        typer.echo(f"    Oracle:   {step.oracle_status}  ->  feedback {step.feedback.value}")
+        if step.reproduction_detail:
+            typer.echo(f"    Recheck:  {step.reproduction_detail}")
+        typer.echo("")
+
+    # A refusal that never ran has no measurements worth printing: a table of
+    # zeroes beside "Result: refused" reads like a search that found nothing.
+    if result.steps or result.executions:
+        typer.echo("  Measurements")
+        typer.echo(f"    Candidate universe:  {result.universe_size}")
+        typer.echo(f"    Distinct probes:     {result.distinct_probes}")
+        typer.echo(f"    Docker executions:   {result.executions}")
+        typer.echo(f"    Recheck executions:  {result.reproduction_executions}")
+        typer.echo(f"    Expected behaviour:  {result.match_count}")
+        typer.echo(f"    Mismatches:          {result.mismatch_count}")
+        typer.echo(f"    Inconclusive:        {result.inconclusive_count}")
+        typer.echo(f"    First mismatch at:   {_index_text(result.first_mismatch_probe)}")
+        typer.echo(f"    First reproduced at: {_index_text(result.first_reproduced_probe)}")
+        typer.echo("")
+
+    typer.echo(f"  Result: {result.termination.value}")
+    typer.echo(f"  Reason: {result.reason}")
+    typer.echo("")
+    typer.echo("  Meaning:")
+    if result.found_violation:
+        typer.echo("    Two independent executions of one input contradicted the same")
+        typer.echo("    user-declared contract on one source snapshot.")
+    else:
+        typer.echo("    No reproduced contradiction was found within the probes this")
+        typer.echo("    bounded search actually ran. That is not a statement that the")
+        typer.echo("    target is correct, and no coverage is claimed.")
+    typer.echo("    Not a universally confirmed defect, and not a calibrated claim about")
+    typer.echo("    how effective this policy is.")
+
+
+def _index_text(value: int | None) -> str:
+    """Render a probe index, keeping 'never happened' visibly distinct."""
+
+    return "never" if value is None else f"probe {value}"
 
 
 def _contract_digest(path: Path) -> str:

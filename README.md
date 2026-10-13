@@ -44,8 +44,9 @@ straightforward code.
 **Early development. Structure, semantics, boundaries, structural risk ranking,
 explicit oracle mining, static annotation shapes, safe baseline synthesis,
 invocation planning, strategy planning, an isolated Docker execution backend,
-runtime oracle evaluation, and bounded single-integer counterexample minimization
-are implemented; adaptive search is not.**
+runtime oracle evaluation, bounded single-integer counterexample minimization,
+and budgeted feedback-guided semantic neighborhood search are implemented; a
+learned search policy is not.**
 
 What exists today:
 
@@ -1156,6 +1157,201 @@ dictionaries, floats, multiple parameters, stateful sequences, symbolic
 constraints, framework fixtures, or custom-exception expectation resolution. A
 correct narrow shrinker is preferable to a broad unsound one.
 
+## Searching around one integer input
+
+`shrink` minimizes a counterexample you already have. `explore` *finds* one: it
+starts from a single integer, runs it, judges it against one explicitly selected
+contract, and uses that verdict to choose the next input.
+
+```powershell
+edgehunter explore . `
+  --target validators.py::validate `
+  --contract-file contracts.json `
+  --contract-id negative-rejected `
+  --start-int=-64 `
+  --policy feedback `
+  --max-probes 8 `
+  --max-executions 12 `
+  --allow-execution
+```
+
+The same contract format, the same staging, the same container, and the same
+reproduction rule as `shrink`. What is new is the loop:
+
+```text
+candidate universe  →  policy selects one  →  Docker executes it
+                    →  the contract judges it  →  typed feedback
+                    →  state updates  →  next input is selected
+```
+
+### Requirements before anything runs
+
+Identical to `shrink`, and all checked before the first container:
+
+- a contract file **explicitly selected** on the command line, with its id
+- the contract's `source_sha256` matching the analyzed file
+- the target resolving to exactly one analyzed, supported callable
+- `--start-int` inside the declared domain and the signed 64-bit range
+- no conflicting applicable exact-test expectation
+- `--allow-execution`
+
+The presence of a contract file is **never** authorization. An exact-input
+expectation still cannot drive this command: `assert f(100) == 200` says nothing
+about `f(10)`, so without a selected contract `explore` refuses and runs nothing.
+
+### How candidates are generated
+
+Every candidate is a single integer for the contract's parameter, and every one
+is checked against the declared domain **before** it is offered — and again
+immediately before execution. A value the contract does not govern is not a
+weaker candidate; it is not a candidate, so it can never start a container or be
+reported as a violation.
+
+| Operator | Source |
+|---|---|
+| contract anchor | the domain's closest-to-zero admissible integer (`x < 0` → `-1`) |
+| user seed | the integer you supplied |
+| source boundaries | integers at, below, and above each mined comparison |
+| midpoints | repeated floor halvings from the seed towards the anchor |
+| neighbours | the adjacent admissible integers of the anchor and the seed |
+
+The universe is **finite by construction**: a fixed set of operators applied to
+a fixed set of starting points, then truncated to a candidate cap (64 by
+default, 128 hard). An open-ended inequality such as `x < 0` is never
+enumerated.
+
+Phase 2 keeps a *signed* literal symbolic — for `if x == -2` it records the
+comparison but declines to emit a boundary of `-2`. `explore` reads that case
+back, with a strict signed-decimal recognizer and `int()`, never `eval`. A
+reference the source names but does not define (`-limit`, `-2 + 3`, `-x`) still
+produces nothing.
+
+### The two policies
+
+Both receive the same candidate universe, the same budgets, the same oracle, and
+the same executor. Only the ordering differs.
+
+**`--policy static`** is the deterministic baseline. It follows one documented
+order — anchor, user seed, source boundaries, midpoints, neighbours — sorted by
+`(origin, action kind, |value|, value, identifier)`. It never consults a runtime
+outcome. It exists so that any claim about the other policy has something
+honest to be measured against.
+
+**`--policy feedback`** is the same universe and the same budget, but the
+previous probe's verdict changes the next choice. After a probe that behaved as
+the contract expects, it tries the **nearest untested domain-valid neighbour**,
+because that is the cheapest place to find out whether the behaviour holds just
+past the point the last probe sat on. After a verdict that decided nothing, it
+continues in the shared static order.
+
+The transition table is implemented literally in `search/policy.py` rather than
+described in prose, so each row is pinned by a test.
+
+```text
+Match                    → nearest untested in-domain neighbour
+Inconclusive / Unsupp.   → next candidate in the shared static order
+Infrastructure failure   → stop only if target-independent (see below)
+Conflicting evidence     → stop
+```
+
+A **target-independent** failure — a container that could not start, a target the
+worker could not find, a malformed result document — stops the search, because
+it will fail identically for every remaining candidate. A **timeout** or an
+**import failure** may genuinely depend on the input, so the search records the
+reason and continues. Neither is ever evidence.
+
+### Reproduction is not a policy decision
+
+A single contradiction is not a finding. Whichever policy observed it, the
+orchestrator re-executes the identical request on the same staged snapshot
+before anything else is tried, and only two signature-matched observations
+become a result.
+
+| First execution | Recheck | Result |
+|---|---|---|
+| mismatch | mismatch, same signature | `violation_reproduced` |
+| mismatch | match | `flaky_observation` |
+| mismatch | timeout / sandbox gone | `inconclusive` |
+| mismatch | different exception class | `inconclusive` |
+
+This is deliberately *not* a policy rule. Giving each policy its own
+reproduction rule would let the baseline confirm fewer findings purely by being
+written differently, which would make the comparison meaningless.
+
+### Budgets
+
+```text
+distinct probes       8 default,  20 hard
+total executions     12 default,  32 hard   (rechecks included)
+candidate universe   64 default, 128 hard
+wall clock          180 s
+per execution     the Docker runner default (--timeout)
+```
+
+Every container launch counts, including one that failed to produce evidence. A
+verification rerun consumes an **execution** but not a **distinct-probe slot**,
+because re-running an already-tested input is not a new probe. A budget too
+small to confirm a mismatch yields `execution_budget_exhausted` with no finding —
+never `violation_reproduced`.
+
+### Stopping statuses
+
+Ten distinct outcomes, never collapsed:
+
+```text
+violation_reproduced          one input contradicted the contract twice
+no_reproduced_violation       the whole universe ran; nothing reproduced
+probe_budget_exhausted        the probe budget stopped the search
+execution_budget_exhausted    the container budget stopped the search
+wall_time_budget_exhausted    the clock stopped the search
+flaky_observation             two executions disagreed
+inconclusive                  a recheck could not be judged
+conflicting_evidence          applicable evidence disagreed
+refused                       an input was rejected before execution
+sandbox_unavailable           no execution backend
+```
+
+`no_reproduced_violation` means *within the probes this bounded search ran*, and
+nothing about inputs that were never tried. It is never reported as "the target
+is correct", and an exhausted budget is never reported as exhaustive coverage.
+
+### What is measured, and what is not
+
+Reported: policy, source snapshot, contract id, distinct probes attempted, total
+container executions, match / mismatch / inconclusive counts, first mismatch
+index, first reproduced mismatch index, reproduction attempts, observed wall
+time, final status.
+
+Not reported: code coverage, path coverage, mutation score, or any probability
+that a defect exists. None of those is observable here, so none is invented.
+
+### A measured comparison — one fixture, not a benchmark
+
+On a target that special-cases one negative input and omits the exception for
+it, with an 8-probe / 12-execution budget on one source snapshot:
+
+```text
+STATIC_PRIORITY : 3 probes, 4 executions, first mismatch at probe 3, first reproduced at probe 3
+FEEDBACK_GUIDED : 2 probes, 3 executions, first mismatch at probe 2, first reproduced at probe 2
+```
+
+Both reproduced a contradiction. On this one fixture the feedback policy reached
+it in fewer distinct probes. That is the whole claim: a single favourable
+example is not evidence of general superiority, and no such claim is made here.
+The reproducible numbers come from
+`tests/test_search_integration.py::test_the_static_baseline_runs_the_same_snapshot_and_budget`,
+which prints both measurements.
+
+### Not supported in this version
+
+Only **one integer parameter**, **one declared inequality**, **one expected
+builtin exception**, **one source snapshot**, **one failure signature**, and
+**one changed parameter at a time**. No multi-parameter mutation, no stateful
+sequences, no string or collection neighbourhoods, no learned model, no
+multi-agent search, no coverage claim. `explore` does not shrink: it stops when
+it finds a reproduced contradiction, and `shrink` is a separate command you
+invoke yourself.
+
 ## Architecture
 
 Only the components below exist today:
@@ -1226,6 +1422,13 @@ src/edgehunter/
 │   ├── proposals.py   deterministic bounded proposal generation (abs(x) metric)
 │   ├── signature.py   the observed failure character a reduction must preserve
 │   └── repository.py  preflight, snapshot-fixed search, acceptance, artifact
+├── search/            neighborhood search: which input comes next, and why
+│   ├── __init__.py    public interface
+│   ├── models.py      actions, budgets, feedback, state, termination, result
+│   ├── actions.py     bounded deterministic candidate universe (pure)
+│   ├── policy.py      STATIC_PRIORITY + FEEDBACK_GUIDED (pure, no Docker)
+│   ├── state.py       immutable state transitions (pure)
+│   └── repository.py  preflight, the causal loop, budgets, JSON artifact
 └── runtime/           the trusted worker: the ONLY code that loads target code
     ├── __init__.py    package marker
     ├── worker.py      in-container loader/invoker, runs only inside the sandbox
@@ -1332,11 +1535,16 @@ mypy                        # strict type checking (configured in pyproject.toml
 - [x] qualified exception identity (module, qualname, builtin lineage from the sandbox)
 - [x] shrinkability classification (an exact oracle refuses input-changing shrink)
 - [x] bounded counterexample minimization (one integer, one user-declared contract)
+- [x] deterministic static search baseline (a documented, nonadaptive ordering)
+- [x] budgeted feedback-guided search (typed feedback changes the next input)
 - [ ] property-based test generation
-- [ ] counterexample search
+- [ ] counterexample search beyond one integer parameter
 - [ ] failure shrinking beyond one integer
-- [ ] adaptive neighborhood search
-- [ ] learned search policy
+- [ ] multi-type semantic neighborhoods
+- [ ] larger empirical benchmark corpus
+- [ ] action-effectiveness evaluation
+- [ ] adaptive learned policy
+- [ ] small specialist model training
 
 ## Documentation
 
