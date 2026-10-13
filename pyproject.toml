@@ -32,6 +32,8 @@ dependencies = [
 dev = [
     "mypy>=1.10",
     "pytest>=8",
+    # Validates the GitHub Actions workflow files without an online round trip.
+    "pyyaml>=6",
     "ruff>=0.6",
 ]
 
@@ -45,7 +47,10 @@ version = { attr = "edgehunter.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
+# The Dockerfile is the container-side runtime the worker image is built from.
 edgehunter = ["runtime/Dockerfile"]
+# The benchmark corpus ships so a wheel install can still reproduce the numbers.
+"edgehunter.benchmark" = ["fixtures/*.py"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
@@ -57,6 +62,10 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# The benchmark fixtures are deliberately-written *targets*, not library code:
+# they are excluded from the project's own lint and type gates for the same
+# reason test fixtures are, so a fixture cannot be "fixed" into passing.
+extend-exclude = ["src/edgehunter/benchmark/fixtures"]
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "UP"]
@@ -65,3 +74,4 @@ select = ["B", "E", "F", "I", "UP"]
 files = ["src", "tests"]
 python_version = "3.10"
 strict = true
+exclude = ["src/edgehunter/benchmark/fixtures/"]

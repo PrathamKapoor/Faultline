@@ -1,0 +1,144 @@
+name: ci
+
+# Fast, secret-free validation on every push and pull request.
+#
+# This workflow runs no target code and no Docker containers: `-m "not
+# integration"` deselects every test that would start one. The Docker suite is a
+# separate workflow with its own triggers, because executing untrusted-shaped
+# fixtures on every push is a decision that belongs to the repository owner.
+#
+# Nothing here has ever been observed to run on GitHub. The status badges are
+# deliberately absent from the README until a first successful run is recorded.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: static analysis and unit tests (py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the package with its development tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      - name: strict mypy
+        run: mypy
+
+      - name: unit tests (no target execution)
+        run: python -m pytest -q -m "not integration"
+
+  windows:
+    name: unit tests on Windows (py3.12)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the package with its development tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: unit tests (no target execution)
+        run: python -m pytest -q -m "not integration"
+
+  package:
+    name: build, install, and smoke-test the wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build the sdist and the wheel
+        run: python -m build --sdist --wheel --outdir dist
+
+      - name: Confirm the runtime assets ship in the wheel
+        # The Dockerfile is how the worker image is built, and the benchmark
+        # fixtures are how the published numbers are reproduced. A wheel missing
+        # either would install successfully and then fail at runtime.
+        run: |
+          python - <<'PY'
+          import sys, zipfile, glob
+          wheel = glob.glob("dist/*.whl")
+          assert len(wheel) == 1, f"expected exactly one wheel, found {wheel}"
+          names = zipfile.ZipFile(wheel[0]).namelist()
+          required = [
+              "edgehunter/runtime/Dockerfile",
+              "edgehunter/runtime/worker.py",
+              "edgehunter/benchmark/fixtures/correct_rejection.py",
+          ]
+          missing = [name for name in required if name not in names]
+          if missing:
+              sys.exit(f"wheel is missing runtime assets: {missing}")
+          print(f"wheel contains all {len(required)} required runtime assets")
+          PY
+
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv smoke
+          smoke/Scripts/python -m pip install --upgrade pip || smoke/bin/python -m pip install --upgrade pip
+          (smoke/Scripts/python || smoke/bin/python) -m pip install dist/*.whl
+
+      - name: Verify the console entry point
+        run: |
+          (smoke/Scripts/edgehunter || smoke/bin/edgehunter) --version
+          (smoke/Scripts/edgehunter || smoke/bin/edgehunter) --help
+          (smoke/Scripts/edgehunter || smoke/bin/edgehunter) scan --help
+
+      - name: Verify an installed scan works outside the checkout
+        run: |
+          mkdir -p /tmp/sample
+          cat > /tmp/sample/mod.py <<'PY'
+          def parse_age(text: str) -> int:
+              value = int(text)
+              if value < 0:
+                  raise ValueError("age must not be negative")
+              return value
+          PY
+          (smoke/Scripts/edgehunter || smoke/bin/edgehunter) scan /tmp/sample --targets

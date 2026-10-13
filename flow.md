@@ -1244,3 +1244,169 @@ never 1 — reserved for "scan found issues"
 | tests | Added the CLI suite: authorization, policy spelling, every validation refusal, unchanged `scan`/`run`/`shrink`, and the reserved exit code | tests/test_search_cli.py | bd7b46c | D-107 |
 | tests | Added real-Docker integration: a correct target matches everywhere, the feedback policy reproduces a nearby contradiction, the static baseline under the same budget, an out-of-domain refusal, an unavailable sandbox, a stale fingerprint, one shared snapshot, and container cleanup | tests/test_search_integration.py | bd7b46c | D-101, D-110 |
 | docs | Recorded D-093 through D-110 and this flow section | decisions.md, flow.md | bd7b46c | D-093..D-110 |
+
+## 21. Benchmark harness rules (`src/edgehunter/benchmark/`)
+
+`edgehunter benchmark` runs a small, versioned corpus through the **real** engine
+against a **real** Docker sandbox. It exists so the search policies can be
+measured on more than one fixture — and, just as importantly, so they can be
+measured when they lose.
+
+### 21.1 Fixture declaration and execution
+
+```text
+run_corpus(CORPUS, only=(...))                      benchmark/harness.py
+ ├─ for each BenchmarkFixture
+ │   ├─ _fixture_source(fixture, repository)         copy the one shipped source
+ │   │                                               → <repo>/target.py
+ │   ├─ digest = SHA-256(target.py)                 the real bytes
+ │   └─ _write_contract(repository, fixture, digest) → <repo>/contracts.json
+ │
+ ├─ kind == SUBSYSTEM
+ │   ├─ materialization      → _materialization_case()   no container needed
+ │   ├─ fingerprint          → _fingerprint_case()       digest "0"*64
+ │   └─ sandbox-unavailable  → _sandbox_case()           open_session patched out
+ │
+ ├─ kind == UNSUPPORTED_SHAPE → _unsupported_shape_case() expects `refused`
+ └─ kind == SEARCH | NEGATIVE → _search_case()
+      └─ for each declared policy:
+           request = ExploreRequest(contract, start, target, policy)
+           result  = explore_integer(scan, repository, request, authorized=True,
+                                      runner=None)          THE REAL ENGINE
+           measurements.append(PolicyMeasurement(...))     read back from result
+```
+
+`runner=None` is the point: the harness does **not** inject a fabricated runner,
+so every number comes from the same code path the CLI uses. The single exception
+is `sandbox-unavailable`, whose property *is* that no backend exists, so
+`open_session` is patched for that case only.
+
+### 21.2 How a case is judged
+
+```text
+kind == NEGATIVE  → every policy stayed silent
+                    (no_reproduced_violation | probe_budget_exhausted)
+kind == SEARCH    → at least one policy reproduced the seeded contradiction
+otherwise         → ERROR
+
+AS_DECLARED when the case matches its declaration
+UNEXPECTED when it does not        ← recorded, never smoothed over
+ERROR      when the harness itself failed
+```
+
+A fixture that disagrees with its own documentation is a finding about the
+fixture or the engine. Reporting it is the only honest option.
+
+### 21.3 Aggregation rules
+
+```text
+comparable_fixture_ids(report)
+  └─ intersection of fixtures every compared policy ran
+
+aggregate_probes_to_first_reproduction(report, policy, restrict_to=comparable)
+  ├─ mean probes to first reproduction
+  │     over reproduced cases ONLY
+  └─ a case that reproduced nothing → cases_not_reproduced, NEVER averaged as 0
+                                    (a miss must not read as a fast run)
+
+head_to_head(report)
+  ├─ per_fixture[]: reproduced_by[], and per-policy probes/executions/termination
+  ├─ reproduced_only_by{policy: count}   symmetric: either policy can be credited
+  ├─ both_reproduced: count
+  └─ neither_reproduced: [ids]           reported, not dropped
+```
+
+The harness emits three aggregate blocks: cross-policy over the intersection,
+per-policy totals over each policy's own fixtures, and the head-to-head table.
+Averaging over different case sets would measure the fixtures rather than the
+policies.
+
+### 21.4 Observed result (corpus 1.0.0)
+
+```text
+comparable fixtures: 5
+  correct-rejection      neither reproduced        (correct target — the required case)
+  anchor-fault           both reproduced at probe 1
+  interior-value-fault   both reproduced           static 3, feedback 4
+  seed-fault             static only               static 2, feedback missed
+  far-value-fault        static only               static 3, feedback missed
+
+static_priority  reproduced 4/5, mean probes to first reproduction 2.25
+feedback_guided  reproduced 2/5, mean probes to first reproduction 2.50
+```
+
+The deterministic baseline wins on this corpus. `seed-fault` and
+`far-value-fault` exist precisely to make that possible: a mined comparison names
+the interesting value directly, while a one-step-at-a-time walk cannot reach it
+inside the budget. No policy rule was changed after this measurement.
+
+### 21.5 What the harness never computes
+
+No coverage, no mutation score, no probability, no severity, no percentage
+improvement. `PolicyMeasurement` has no such field, and a test fails if one is
+added. Wall-clock seconds are recorded as a real observation and are never used
+for ordering.
+
+## 22. Release-engineering additions
+
+### 22.1 Packaging (`pyproject.toml`)
+
+```text
+runtime dependency   typer>=0.12                     unchanged since D-001
+dev extra            mypy, pytest, pyyaml, ruff       pyyaml added for D-116
+package data         edgehunter = ["runtime/Dockerfile"]
+                     "edgehunter.benchmark" = ["fixtures/*.py"]
+lint/type exclusion  src/edgehunter/benchmark/fixtures/
+```
+
+The fixtures are excluded from this project's own gates because they are
+deliberately-written *targets*, not library code — the same reason test fixtures
+are, so that a fixture cannot be "fixed" into passing. They are shipped so a
+wheel install can still reproduce the benchmark numbers.
+
+### 22.2 CI (`.github/workflows/`)
+
+```text
+ci.yml                   ruff check / ruff format / strict mypy / pytest -m "not integration"
+                         on Python 3.10, 3.11, 3.12 (Linux) and 3.12 (Windows)
+  └─ package job         build sdist+wheel, assert the Dockerfile, worker and a
+                         fixture are inside the wheel, install into a clean venv,
+                         run --version, --help, scan --help, and a scan outside
+                         the checkout
+
+docker-integration.yml   rebuilds edgehunter-runtime:1, runs pytest -m integration,
+                         runs `edgehunter benchmark --allow-execution`, then FAILS
+                         if any edgehunter-run-* container remains
+
+both                    permissions: contents: read   ·   no secrets   ·   no pull_request_target
+```
+
+No workflow has ever been observed to run on GitHub, so no CI status is claimed
+anywhere in the documentation.
+
+### 22.3 Security documentation
+
+`SECURITY.md` replaces the sandbox section that previously lived inside the
+phase-ordered README. It separates the trust zones, states what runs where, and
+gives a full limitations section covering: the target and worker sharing one
+process, the nonce being a consistency check rather than a cryptographic proof,
+container escape being out of scope, resource limits being best-effort, a timeout
+never being a verdict, and the stale-worker-image recipe.
+
+## Changes in this session (Final consolidation — audit, benchmark, package, document)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| benchmark | Added the `benchmark` package: versioned corpus, nine real fixture sources, the harness that runs the real engine, and the measurement model | src/edgehunter/benchmark/, src/edgehunter/benchmark/fixtures/ | uncommitted | D-111 |
+| benchmark | Added `comparable_fixture_ids()`, `restrict_to` aggregation, and `head_to_head()`; a policy that reproduced nothing is never averaged as zero | src/edgehunter/benchmark/models.py | uncommitted | D-113 |
+| benchmark | Added `sandbox-unavailable`, `unsupported-shape`, `fingerprint-mismatch`, `bool-materialization`, and `string-materialization` subsystem cases, so the corpus covers refusals and materialization rather than only search | src/edgehunter/benchmark/harness.py, src/edgehunter/benchmark/corpus.py | uncommitted | D-111 |
+| CLI | Added the `benchmark` command with `--allow-execution`, `--only`, and `--report`, exiting non-zero when a case disagrees with its declaration | src/edgehunter/cli.py | uncommitted | D-111 |
+| config | Added the benchmark fixture package data, the pyyaml dev dependency, and the fixture exclusions from ruff and mypy | pyproject.toml | uncommitted | D-111, D-116 |
+| docs | Added `SECURITY.md`: trust zones, what runs where, every container restriction with its purpose, and a full limitations section | SECURITY.md | uncommitted | D-115 |
+| ci | Added a static workflow (3.10–3.12 + Windows + wheel smoke test) and a separate restricted Docker workflow with image rebuild and cleanup assertion | .github/workflows/ci.yml, .github/workflows/docker-integration.yml | uncommitted | D-116 |
+| tests | Added the corpus suite: version, bounds, source existence, trigger consistency, and the mechanical checks that the engine cannot see the corpus and that a miss is never averaged as a fast run | tests/test_benchmark_corpus.py | uncommitted | D-111, D-113, D-114 |
+| tests | Added the real-Docker benchmark suite: every case as declared, the correct target silent, matched budgets and universes, reproduction costing an extra execution, and structural (never outcome) head-to-head assertions | tests/test_benchmark_integration.py | uncommitted | D-112 |
+| tests | Added the workflow suite: valid YAML, step structure, read-only permissions, no Docker in the static workflow, synthetic fixtures only, image rebuild, and cleanup assertion | tests/test_workflows.py | uncommitted | D-116 |
+| docs | Rewrote `README.md` as a product page with output captured from real runs, including the unfavourable benchmark result | README.md | uncommitted | D-118 |
+| docs | Recorded D-111 through D-120 and this flow section | decisions.md, flow.md | uncommitted | D-111..D-120 |
+| hygiene | Removed four stray empty directories that `git status` could not surface, having verified each held zero entries | t1/, t2/, t3/, t4/ | uncommitted | D-120 |

@@ -1,0 +1,95 @@
+name: docker-integration
+
+# Real-container integration: the only workflow that executes target-shaped code.
+#
+# Every fixture it runs is a small synthetic file shipped inside the
+# `edgehunter.benchmark` package, so no real-world repository and no
+# user-supplied code is ever executed. It requires no secrets and no write
+# permissions, and it never runs on an untrusted pull request.
+#
+# Local Docker integration is enabled by default. When a contributor has not
+# enabled it for their fork, this workflow is skipped rather than failed: a
+# missing local daemon is not a defect in the code.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Once a week, so a Docker change upstream is noticed rather than discovered.
+    - cron: "37 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: real Docker integration and benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that Docker is available
+        id: docker
+        run: |
+          if docker info >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Docker is not reachable here; skipping the container suite."
+          fi
+
+      - name: Set up Python
+        if: steps.docker.outputs.available == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the package with its development tools
+        if: steps.docker.outputs.available == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Verify the worker image is not stale
+        if: steps.docker.outputs.available == 'true'
+        # The image is cached by tag, so an old worker can survive a source edit.
+        # Rebuilding unconditionally is the only way to be sure the worker under
+        # test is the worker in this commit.
+        run: |
+          docker image rm edgehunter-runtime:1 >/dev/null 2>&1 || true
+          python - <<'PY'
+          from pathlib import Path
+          from edgehunter.execution.repository import ensure_image, runtime_context
+          ready, detail = ensure_image(runtime_context())
+          print(detail)
+          if not ready:
+              raise SystemExit(f"the worker image could not be prepared: {detail}")
+          assert Path("src/edgehunter/runtime/Dockerfile").is_file()
+          PY
+
+      - name: Run the Docker integration suite
+        if: steps.docker.outputs.available == 'true'
+        run: python -m pytest -q -m integration
+
+      - name: Run the benchmark corpus
+        if: steps.docker.outputs.available == 'true'
+        # Prints the same table a local run prints. The numbers are measurements
+        # of this corpus only and are not published anywhere as a claim.
+        run: python -m edgehunter benchmark --allow-execution
+
+      - name: Confirm no container survived
+        if: steps.docker.outputs.available == 'true'
+        run: |
+          leftovers=$(docker ps -a --filter "name=edgehunter-run-" --format "{{.Names}}")
+          if [ -n "$leftovers" ]; then
+            echo "EdgeHunter containers were left behind:"
+            echo "$leftovers"
+            exit 1
+          fi
+          echo "no EdgeHunter containers remain"

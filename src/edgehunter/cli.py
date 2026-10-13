@@ -13,6 +13,13 @@ from typing import Annotated, Final
 import typer
 
 from edgehunter import __version__
+from edgehunter.benchmark import (
+    CORPUS,
+    CorpusReport,
+    FixtureVerdict,
+    run_corpus,
+    write_corpus_report,
+)
 from edgehunter.evaluation.models import EvaluationReport, ReproductionStatus
 from edgehunter.evaluation.repository import HARD_MAX_RECHECKS, evaluate_run, target_functions
 from edgehunter.execution.models import RunReport
@@ -597,6 +604,161 @@ def _index_text(value: int | None) -> str:
     """Render a probe index, keeping 'never happened' visibly distinct."""
 
     return "never" if value is None else f"probe {value}"
+
+
+@app.command()
+def benchmark(
+    allow_execution: Annotated[
+        bool,
+        typer.Option(
+            "--allow-execution",
+            help=(
+                "Authorize running the corpus's synthetic targets inside Docker. Required: the "
+                "corpus measures the real engine, not a simulation of it."
+            ),
+        ),
+    ] = False,
+    only: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--only",
+            help="Run only the named fixture(s). Repeatable. Defaults to the whole corpus.",
+        ),
+    ] = None,
+    write_report: Annotated[
+        str,
+        typer.Option(
+            "--report",
+            help="Also write the full JSON report (measurements and per-probe traces) here.",
+        ),
+    ] = "",
+) -> None:
+    """Run the versioned benchmark corpus against the real engine.
+
+    The corpus is small, synthetic, and declared: every fixture states the
+    behaviour deliberately written into it, so a reader can check the source
+    against the documentation. It includes fixtures where the deterministic
+    baseline finds a contradiction the adaptive policy does not, and a correct
+    target where neither may claim anything.
+
+    Numbers from this command describe *this corpus only*. They are not a claim
+    about any real repository, not a coverage figure, and not evidence that one
+    policy is generally better than another.
+    """
+    if not allow_execution:
+        typer.secho(
+            "error: the benchmark runs real containers; pass --allow-execution",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_EXECUTION_REFUSED)
+
+    try:
+        report = run_corpus(CORPUS, only=tuple(only or ()))
+    except KeyError as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_INVALID_INPUT) from exc
+
+    _print_benchmark(report)
+
+    if write_report:
+        try:
+            write_corpus_report(report, write_report, run_id="benchmark")
+        except (OSError, ValueError) as exc:
+            typer.secho(f"error: the report could not be written: {exc}", fg=typer.colors.RED)
+        else:
+            typer.echo("")
+            typer.echo(f"Full report: {write_report}")
+
+    if report.unexpected or any(case.verdict is FixtureVerdict.ERROR for case in report.cases):
+        # A corpus whose results disagree with its own declarations is a finding
+        # about the corpus or the engine, not a passing run.
+        raise typer.Exit(code=EXIT_INVALID_INPUT)
+    raise typer.Exit(code=EXIT_SHRINK_COMPLETED)
+
+
+def _print_benchmark(report: CorpusReport) -> None:
+    """Print the corpus result: every case, then only the comparable aggregates."""
+
+    typer.echo("EdgeHunter benchmark")
+    typer.echo("")
+    typer.echo(f"  Corpus version:   {report.corpus_version}")
+    typer.echo(
+        f"  Cases:            {len(report.cases)} "
+        f"({report.as_declared} as declared, {report.unexpected} unexpected)"
+    )
+    typer.echo("")
+
+    width = max((len(case.fixture_id) for case in report.cases), default=10)
+    typer.echo(f"  {'fixture'.ljust(width)}  {'kind':<10}  {'declared':<24} observed")
+    typer.echo(f"  {'-' * width}  {'-' * 10}  {'-' * 24} {'-' * 26}")
+    for case in report.cases:
+        typer.echo(
+            f"  {case.fixture_id.ljust(width)}  {case.kind.value:<10}  "
+            f"{case.declared[:24]:<24} {case.observed}"
+        )
+        if case.verdict is FixtureVerdict.UNEXPECTED:
+            typer.echo(f"  {'':>{width}}  !! unexpected: {case.detail}")
+    typer.echo("")
+
+    measurements = report.measurements()
+    if measurements:
+        typer.echo("  Per-policy measurements")
+        typer.echo("")
+        header = (
+            f"  {'fixture'.ljust(width)}  {'policy':<16}  {'univ':>4}  {'probes':>6}  "
+            f"{'execs':>5}  {'mm':>3}  {'repro':>5}  termination"
+        )
+        typer.echo(header)
+        typer.echo("  " + "-" * (len(header) - 2))
+        for row in measurements:
+            typer.echo(
+                f"  {row.fixture_id.ljust(width)}  {row.policy:<16}  "
+                f"{row.candidate_universe:>4}  {row.distinct_probes:>6}  "
+                f"{row.container_executions:>5}  {row.mismatch_count:>3}  "
+                f"{str(row.first_reproduced_probe or '-'):>5}  {row.termination}"
+            )
+        typer.echo("")
+
+    head = report.aggregates.get("head_to_head")
+    if isinstance(head, dict) and head.get("comparable_fixtures"):
+        only_by = head.get("reproduced_only_by")
+        neither = head.get("neither_reproduced")
+        typer.echo("  Head to head (fixtures every compared policy ran)")
+        typer.echo("")
+        if isinstance(only_by, dict):
+            for policy, count in sorted(only_by.items()):
+                typer.echo(f"    reproduced only by {policy:<16} {count}")
+        typer.echo(f"    reproduced by both            {head.get('both_reproduced', 0)}")
+        missing = neither if isinstance(neither, list) else []
+        listed = ", ".join(str(name) for name in missing)
+        typer.echo(
+            f"    reproduced by neither          {len(missing)}{f'  ({listed})' if listed else ''}"
+        )
+        typer.echo("")
+        for policy_key in ("static_priority", "feedback_guided"):
+            summary = report.aggregates.get(policy_key)
+            if not isinstance(summary, dict):
+                continue
+            mean = summary.get("mean_probes_to_first_reproduction")
+            typer.echo(
+                f"    {policy_key:<16} reproduced "
+                f"{summary.get('cases_reproduced')}/{summary.get('cases_measured')}, "
+                f"mean probes to first reproduction: {mean if mean is not None else 'n/a'}"
+            )
+        typer.echo("")
+
+    if report.notes:
+        typer.echo("  Notes")
+        typer.echo("")
+        for note in report.notes:
+            typer.echo(f"    - {note}")
+        typer.echo("")
+
+    typer.echo("  Meaning:")
+    typer.echo("    Measurements of this corpus only, through the real engine and a real")
+    typer.echo("    sandbox. Not a coverage figure, not a defect rate for any real")
+    typer.echo("    repository, and not evidence that one policy is generally better.")
 
 
 def _contract_digest(path: Path) -> str:
