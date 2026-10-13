@@ -90,6 +90,18 @@ _EVIDENCE_KINDS: dict[OracleEvidenceKind, OracleKind] = {
 }
 
 
+def is_infrastructure_outcome(outcome: OutcomeKind) -> bool:
+    """Whether an outcome means the target's behaviour was never observed.
+
+    Exposed so any other evaluator-like surface reuses this one classification
+    instead of restating the set. An infrastructure failure is never an oracle
+    violation, and a caller that needs to decide "was this a usable observation"
+    must not have to copy the list to find out.
+    """
+
+    return outcome in _INFRASTRUCTURE_OUTCOMES
+
+
 def evaluate_oracle(
     expectation: TestExpectationCandidate,
     signature: InvocationSignature,

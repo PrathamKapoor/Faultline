@@ -826,3 +826,199 @@ captured target output and exception messages are deliberately excluded
 | tests | Added real-Docker exception identity covering a real builtin, a shadowed same-name class, a genuine subclass, an unrelated exception, bounded metadata, and cleanup | tests/test_execution_exception_identity_integration.py | dbb27e2 | D-073 |
 | tests | Updated two existing tests whose expectations existed only because `bool`/`str` were unreachable; added a source-level shadowing-mining suite | tests/test_pipeline.py, tests/test_safety.py, tests/test_oracle_test_expectations.py | dbb27e2 | D-070, D-076 |
 | docs | Recorded D-070 through D-077, updated the generation, strategy, execution, and evaluation sections of this document | decisions.md, flow.md | dbb27e2 | D-070..D-077 |
+
+## 19. Shrinkability and minimization rules (`src/edgehunter/shrink/`)
+
+`edgehunter shrink` minimizes **one integer** against **one user-declared
+contract**. It is a bounded, deterministic search that reuses the existing
+Docker route, the existing typed protocol, and the existing exception rules; it
+adds no executor, no evaluator, and no second staging implementation.
+
+### 19.1 Why an exact oracle cannot be shrunk
+
+```text
+assert double(100) == 200          observed double(10) → 21
+  │                                │
+  │ applies to x = 100             │ the expectation never covered this input
+  └─ NOT the same claim as ────────┘ expected 200
+```
+
+`assess_target_shrinkability()`          shrink/shrinkability.py
+ └─ assess_test_expectation(...)         EXACT_INPUT_ONLY  → refuse, before execution
+ └─ assess_production_property(...)      UNSUPPORTED_ORACLE → a guard is not a domain
+ └─ no evidence at all                    INCONCLUSIVE
+
+shrink_integer(scan, root, request, ...)         shrink/repository.py
+ └─ _assess_without_contract(...)         contract_path is None → NOT_SHRINKABLE, nothing runs
+```
+
+The refusal is proven by spying on the attempt runner, not by reading output:
+`test_using_only_the_exact_test_is_not_shrinkable` asserts `runner.calls == []`.
+
+### 19.2 Contract parsing (pure, no execution)
+
+```text
+read_contract_file(path)                  shrink/contract.py
+ ├─ size bound (32 KiB)                    MAX_CONTRACT_FILE_BYTES
+ ├─ json.loads(..., object_pairs_hook=…)   duplicate key anywhere → ContractError
+ ├─ _build_contract_file(...)              strict version == 1, only known keys
+ │   └─ _build_contract(entry, index)      one contract, validated field by field
+ │       ├─ _require_id                   label charset (hyphens allowed)
+ │       ├─ _parse_target                  "path.py::name" + check_relative_path(…)
+ │       ├─ _require_sha256                 64 lowercase hex
+ │       ├─ _require_parameter              ASCII identifier
+ │       ├─ _build_domain                   operator ∈ {lt,le,gt,ge} + decimal string
+ │       └─ _build_expectation              raises_builtin + a real builtins exception
+ └─ every refusal happens before any container could start
+```
+
+Validation is written as explicit character predicates (`_is_sha256`,
+`_is_decimal_integer`, `_is_contract_id`, `_is_identifier`) rather than compiled
+patterns, so a reader can verify each check by eye and the module imports no
+pattern engine. The integer must be a decimal **string** so a JSON boolean or
+arbitrary-precision number cannot pass, and it is bounded to signed 64-bit.
+
+### 19.3 Domain and proposals (pure arithmetic)
+
+```text
+IntegerDomain(operator, reference)        shrink/domain.py
+ ├─ contains(value)                        four explicit comparisons
+ └─ closest_to_zero()                      lt: c-1 if c<=0 else 0
+                                            le: c   if c <0 else 0
+                                            gt: 0   if c <0 else c+1
+                                            ge: 0   if c<=0 else c
+
+propose_values(seed, domain, limit)       shrink/proposals.py
+ ├─ [anchor]                               only when strictly simpler under abs()
+ └─ [midpoint, midpoint, …]               seed → anchor, floor division, stops on no progress
+```
+
+No randomness, no unbounded search, and no claim that the target's behaviour is
+monotone. A passing midpoint says nothing about the untested values between it
+and the seed.
+
+### 19.4 The preflight, before anything is executed
+
+```text
+_preflight(scan, request)                  shrink/repository.py — shared by BOTH routes
+ ├─ _resolve_contract(request)             no contract → refusal; read + select one
+ ├─ _resolve_target(scan, contract)        exactly one analyzed callable, or refusal
+ ├─ _check_seed_target(function, c)       FUNCTION kind, no decorators, no variadics,
+ │                                         exactly one INT parameter with no default
+ ├─ _analyzed_digest(scan, c) == c.source_sha256   else REFUSED (never rebound)
+ ├─ _check_seed(seed, c)                   in range and inside the declared domain
+ └─ _conflicting_expectation(scan, c)      an exact test applies → NOT_SHRINKABLE
+```
+
+Both the Docker route (`_shrink_with_docker`) and the fabricated-runner route
+(`_shrink_with_runner`) go through `_preflight`, so a unit test can never pass on
+a weaker path than production.
+
+### 19.5 Execution: one session, one snapshot, one runner
+
+```text
+open_session(source_root, authorized, ctx)        execution/repository.py
+ ├─ authorization → docker_available() → ensure_image()   same checks, same order
+ └─ _stage_workspace(...)                          ONCE
+
+SessionAttemptRunner(session, target, param, timeout)   shrink/repository.py
+ └─ for each attempt: _seed_request(target, param, value)
+        value → TypedValue(kind=INTEGER, scalar=str(value))   typed, not rendered text
+     └─ session.execute(request) → _run_request(...)   THE container runner
+
+_run_request(...)                                   execution/repository.py
+ └─ write request → build_run_command (hardened) → run_docker → _decode_outcome
+ └─ container_exists → remove → re-check          identical to the `run` command
+```
+
+`_run_request` is the **only** function that starts a container, and both the plan
+route and the shrinker call it. The staged snapshot is fixed for the session, and
+`SourceSnapshot.verify(...)` (Phase 6B, D-062) confirms the staged bytes are the
+analyzed bytes before the first attempt.
+
+### 19.6 Seed verification, then bounded proposals
+
+```text
+runner.execute_attempts(seed, 2)                  two containers first
+ └─ _verify_reproduced(contract, results)
+      ├─ every attempt MISMATCH, one signature   → proceed
+      ├─ contract satisfied                       → ORIGINAL_NOT_FAILING
+      ├─ attempts disagreed                       → ORIGINAL_NOT_REPRODUCIBLE
+      └─ an attempt undecidable                   → INCONCLUSIVE
+
+for value in propose_values(seed, domain, budget):
+    if consumed + reproduction > execution_budget: exhausted = False; break
+    runner.execute_attempts(value, 2)
+    └─ _judge_candidate(...)                      shrink/repository.py
+          1. inside the declared domain?          OUTSIDE_DOMAIN
+          2. strictly simpler under abs()?        NOT_SIMPLER
+          3. contract MISMATCH on every attempt?  ORACLE_NOT_MISMATCH / NOT_REPRODUCIBLE
+          4. no infrastructure failure?           INFRASTRUCTURE_FAILURE
+          5. same failure signature as the seed?  SIGNATURE_MISMATCH
+          └─ all five hold                        ACCEPTED
+```
+
+`evaluate_against_contract(...)`          shrink/repository.py — the contract adapter
+ ├─ snapshot verified?                    else INCONCLUSIVE
+ ├─ infrastructure outcome?               reused via is_infrastructure_outcome(…)
+ ├─ RETURNED + opaque_return?              UNSUPPORTED  (a generator is not a return)
+ ├─ RETURNED                              MISMATCH    (expected a raise, got a return)
+ └─ RAISED → match_exception_observed(...)            the evaluator's own rules
+```
+
+The adapter adds only the domain check and the returned-instead-of-raised step.
+The builtin hierarchy, the identity rules, and the infrastructure classification
+are the evaluator's, called rather than copied.
+
+### 19.7 CLI and artifact
+
+```text
+edgehunter shrink PATH --target path.py::name --contract-file F --contract-id ID
+                      --start-int N --allow-execution [--max-attempts 8]
+                      [--max-executions 32] [--timeout 3.0] [--artifact-id ID]
+
+exit 0  operation completed (whatever the result)
+exit 2  REFUSED — contract, target, fingerprint, or domain problem
+exit 3  INCONCLUSIVE — sandbox unavailable or nothing usable observed
+never 1 — reserved for "scan found issues"
+
+write_shrink_artifact(result, contract_sha, run_id)   shrink/repository.py
+ └─ .edgehunter/runs/<sanitized run id>/shrink.json    via evaluation._safe_run_id
+    schema_version, contract provenance, seed, reduced value, status, reason,
+    policy + budget + metric, every attempt with its rejection reason
+    no captured stdout/stderr, no exception messages, no serialized objects
+```
+
+### 19.8 What is never inferred
+
+- An exact test expectation is never generalized to another input.
+- A production guard or assertion is never promoted to a reusable contract.
+- A contract is never auto-discovered, and never authorized by its own presence.
+- A changed source revision is never silently rebound to a contract.
+- Any exception is never treated as "the same failure" as a normal return.
+- A bounded search is never reported as a proven global minimum.
+- A mismatch against a user declaration is never reported as a confirmed defect.
+
+## Changes in this session (Phase 7B — Shrinkability Contracts + Counterexample Minimization)
+
+| Area | Change | Files | Commit | Decision |
+|---|---|---|---|---|
+| evaluation | Corrected the legacy name-only exception fallback: an observation with no builtin-identity evidence is now `INCONCLUSIVE` in both directions, closing a false `MATCH` and a false `MISMATCH` | src/edgehunter/evaluation/exceptions.py | uncommitted | D-078 |
+| evaluation | Exposed `is_infrastructure_outcome()` so another evaluator-like surface reuses the one classification instead of restating the set | src/edgehunter/evaluation/evaluator.py | uncommitted | D-087 |
+| shrink | Added the `shrink` package with the typed vocabulary: `ShrinkabilityKind`, `ShrinkStatus`, `AttemptOutcome`, `InvocationOrigin`, `OracleSource`, `ShrinkPolicy`, `ShrinkAttempt`, `ShrinkResult` | src/edgehunter/shrink/models.py, src/edgehunter/shrink/__init__.py | uncommitted | D-079, D-089 |
+| shrink | Added the shrinkability assessment: exact test expectations and production properties are refused, unresolved/ambiguous/custom-exception evidence is inconclusive, and only an explicitly selected contract is reusable | src/edgehunter/shrink/shrinkability.py | uncommitted | D-079, D-080 |
+| shrink | Added the versioned JSON contract reader with strict version and key allowlists, duplicate-key refusal, a 32 KiB bound, SHA-256 validation, signed-64-bit decimal-string integers, and the existing path checker for targets | src/edgehunter/shrink/contract.py | uncommitted | D-081, D-082 |
+| shrink | Added the pure integer domain with four operators and a four-case `closest_to_zero()`, and the deterministic anchor-then-midpoint proposal generator under the `abs(value)` metric | src/edgehunter/shrink/domain.py, src/edgehunter/shrink/proposals.py | uncommitted | D-083, D-084 |
+| shrink | Added the failure signature: outcome category plus the observed exception's qualified identity and builtin flag, with infrastructure outcomes having none | src/edgehunter/shrink/signature.py | uncommitted | D-085 |
+| execution | Split `_execute_one` so `_run_request` is the single container runner, and added `ExecutionSession`/`open_session()` for a snapshot fixed across a whole operation | src/edgehunter/execution/repository.py | uncommitted | D-087 |
+| shrink | Added the orchestrator: shared preflight, contract adapter, seed reproducibility gate, bounded proposal loop, per-candidate acceptance, and a structured result | src/edgehunter/shrink/repository.py | uncommitted | D-079, D-085, D-086, D-088 |
+| evaluation | Extracted `_safe_run_id()` so both artifact writers sanitize a run id identically | src/edgehunter/evaluation/repository.py | uncommitted | D-090 |
+| CLI | Added the `shrink` command with explicit contract selection, seed, and authorization; provenance and bounded-search wording are always printed; exit `1` stays reserved | src/edgehunter/cli.py | uncommitted | D-089 |
+| shrink | Added the versioned evidence artifact excluding captured output and exception messages | src/edgehunter/shrink/repository.py | uncommitted | D-090 |
+| tests | Added the shrinkability suite including the exact-oracle core invariant, with the attempt runner spied on to prove nothing was executed | tests/test_shrink_shrinkability.py | uncommitted | D-079 |
+| tests | Added the contract, domain, and proposal suite covering validation refusals, all four operators, boundary equality, and proposal determinism | tests/test_shrink_contract.py | uncommitted | D-081, D-083, D-084 |
+| tests | Added the acceptance, failure-signature, budget, reproduction, no-host-execution, and artifact suites driven by a fabricated attempt runner | tests/test_shrink_search.py | uncommitted | D-085, D-086, D-088, D-090 |
+| tests | Added the shrink CLI suite covering every refusal, the reserved exit code, and that `scan` and `run` are unchanged | tests/test_shrink_cli.py | uncommitted | D-089 |
+| tests | Added real-Docker integration for negative and positive domains, a correct implementation, a changed failure signature, a snapshot mismatch, an unavailable sandbox, cleanup, and a real budget | tests/test_shrink_integration.py | uncommitted | D-085, D-086, D-087 |
+| tests | Updated six existing tests whose expectations encoded the unsound name-only fallback, to supply realistic worker identity evidence instead | tests/test_evaluation_verify.py, tests/test_evaluation_exception_identity.py | uncommitted | D-078 |
+| docs | Recorded D-078 through D-091 and this flow section | decisions.md, flow.md | uncommitted | D-078..D-091 |

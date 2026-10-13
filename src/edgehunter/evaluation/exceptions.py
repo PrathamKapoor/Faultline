@@ -157,10 +157,10 @@ def match_exception_observed(
       may have imported or aliased ``errors`` differently, so the expectation's
       class cannot be resolved without importing target code. Textual similarity
       is never promoted to a match.
-    * **No identity evidence at all falls back to the name-only rules.** A result
-      document written before these fields existed must keep its Phase 6B verdict
-      rather than being downgraded, because refusing to decode old evidence is a
-      silent narrowing of what the tool can say.
+    * **No identity evidence yields ``INCONCLUSIVE`` for a builtin expectation
+      too.** A bare name proves nothing in either direction, so a result document
+      without the identity fields is still decodable but supports no verdict. This
+      is the correction recorded in D-078.
     """
     if expected is None:
         return ExceptionMatch(
@@ -259,32 +259,29 @@ def match_exception_observed(
             ),
         )
 
-    # No identity evidence: keep the Phase 6B name-only rules so an older result
-    # document is not silently downgraded.
-    if observed_qualified and observed.module is not None and observed.module != "builtins":
-        return ExceptionMatch(
-            status=OracleStatus.INCONCLUSIVE,
-            reason=(
-                f"the expectation is the builtin {expected_tail} but the execution raised "
-                f"{observed_text}, which is defined outside the standard library"
-            ),
-        )
-    if observed_tail == expected_tail:
-        return ExceptionMatch(
-            status=OracleStatus.MATCH, reason=f"the execution raised the expected {expected_tail}"
-        )
-    if observed_tail in exception_descendants(expected_tail):
-        return ExceptionMatch(
-            status=OracleStatus.MATCH,
-            reason=(
-                f"the execution raised {observed_tail}, which Python defines as a subclass "
-                f"of {expected_tail}"
-            ),
-            matched_subclass=True,
-        )
+    # No identity evidence at all. A name is not an identity, in *either*
+    # direction, so this cannot be decided rather than merely not being decided
+    # in one direction:
+    #
+    #   observed "ValueError", expected builtin ValueError -> MATCH is unsound,
+    #   because the raised class may be a target's own `class ValueError(Exception)`
+    #   which `pytest.raises(builtin ValueError)` would not catch.
+    #
+    #   observed "KeyError", expected builtin ValueError -> MISMATCH is unsound,
+    #   because a target's own `class KeyError(ValueError)` *does* satisfy it.
+    #
+    # Phase 7A kept a name-only fallback here "so an older result document is not
+    # silently downgraded". That traded a false MATCH for the appearance of
+    # continuity, which is the wrong direction for this project: the document is
+    # still decodable, it just no longer supports a verdict it never had the
+    # evidence for. See D-078.
     return ExceptionMatch(
-        status=OracleStatus.MISMATCH,
-        reason=f"the execution raised {observed_tail}, which is not {expected_tail} or a subclass",
+        status=OracleStatus.INCONCLUSIVE,
+        reason=(
+            f"the execution recorded only the unqualified name {observed_text!r} and reported no "
+            f"evidence of whether it is a standard-library class, so a name comparison against "
+            f"{expected_tail} proves nothing in either direction"
+        ),
     )
 
 

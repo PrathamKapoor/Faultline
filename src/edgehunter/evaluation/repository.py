@@ -391,15 +391,24 @@ def snapshot_digests(report: RunReport, relative_file: str) -> tuple[tuple[str, 
     return report.staged_digests
 
 
+def _safe_run_id(run_id: str) -> str:
+    """Reduce a run id to one safe path segment, never empty.
+
+    Shared by every artifact writer so a crafted id is sanitized identically
+    wherever it is used, rather than by a second rule that could be weaker.
+    """
+
+    safe = "".join(character for character in run_id if character.isalnum() or character in "-_")
+    return safe.strip("-_") or "run"
+
+
 def evaluation_artifact(run_id: str) -> Path:
     """The path one run's evaluation artifact belongs at.
 
     ``run_id`` is sanitized to a single safe path segment, so a crafted id cannot
     write outside the artifact directory.
     """
-    safe = "".join(character for character in run_id if character.isalnum() or character in "-_")
-    safe = safe.strip("-_") or "run"
-    return Path(*PurePosixPath(ARTIFACT_DIRECTORY).parts) / safe / "evaluation.json"
+    return Path(*PurePosixPath(ARTIFACT_DIRECTORY).parts) / _safe_run_id(run_id) / "evaluation.json"
 
 
 def write_evaluation_artifact(path: Path, reports: tuple[EvaluationReport, ...]) -> Path:

@@ -32,6 +32,16 @@ from edgehunter.oracle.models import (
 from edgehunter.pipeline import RepositoryScan, analyze_repository
 from edgehunter.scanner import RepositoryAnalysis, ScanError
 from edgehunter.scanner.models import FunctionInfo
+from edgehunter.shrink import (
+    DEFAULT_MAX_EXECUTIONS,
+    DEFAULT_MAX_PROPOSALS,
+    ShrinkPolicy,
+    ShrinkRequest,
+    ShrinkResult,
+    ShrinkStatus,
+    shrink_integer,
+    write_shrink_artifact,
+)
 
 EXIT_SCAN_ISSUES = 1
 EXIT_INVALID_INPUT = 2
@@ -41,6 +51,13 @@ EXIT_EXECUTION_REFUSED = 3
 Exit code 1 is deliberately never used by `run`, so it cannot be mistaken for
 "a bug was found". This phase performs no oracle evaluation, so there is no such
 outcome to report.
+"""
+
+EXIT_SHRINK_COMPLETED = 0
+"""`shrink` completed and the structured result says what happened.
+
+Never "a counterexample was found". The exit code is not a verdict: whether a
+mismatch was minimized is carried by the result's own status, which is printed.
 """
 
 app = typer.Typer(
@@ -203,6 +220,210 @@ def run(
     _print_execution(report)
     if not report.executed_count:
         raise typer.Exit(code=EXIT_EXECUTION_REFUSED)
+
+
+@app.command()
+def shrink(
+    path: Annotated[
+        Path,
+        typer.Argument(metavar="PATH", help="Directory containing the target to minimize."),
+    ],
+    target: Annotated[
+        str,
+        typer.Option(
+            "--target",
+            help=(
+                "Target to minimize as 'relative/path.py::qualified_name'. Must match the "
+                "contract's bound target exactly; a contract is never redirected."
+            ),
+        ),
+    ],
+    contract_file: Annotated[
+        Path,
+        typer.Option(
+            "--contract-file",
+            help=(
+                "JSON file of user-declared contracts. Never discovered automatically: this "
+                "option is the only way a contract is selected."
+            ),
+        ),
+    ],
+    contract_id: Annotated[
+        str,
+        typer.Option("--contract-id", help="Id of the one contract to apply."),
+    ],
+    start_int: Annotated[
+        int,
+        typer.Option(
+            "--start-int",
+            help=(
+                "The integer to start from. Must satisfy the contract's domain; it is recorded "
+                "as a user-supplied seed, not as a discovered action."
+            ),
+        ),
+    ],
+    allow_execution: Annotated[
+        bool,
+        typer.Option(
+            "--allow-execution",
+            help="Authorize running untrusted target code inside a Docker container.",
+        ),
+    ] = False,
+    max_attempts: Annotated[
+        int,
+        typer.Option("--max-attempts", help="Maximum shrink proposals to execute (bounded)."),
+    ] = DEFAULT_MAX_PROPOSALS,
+    max_executions: Annotated[
+        int,
+        typer.Option(
+            "--max-executions", help="Hard cap on total containers for this operation (bounded)."
+        ),
+    ] = DEFAULT_MAX_EXECUTIONS,
+    timeout: Annotated[
+        float, typer.Option("--timeout", help="Per-invocation wall-clock budget in seconds.")
+    ] = 3.0,
+    artifact_id: Annotated[
+        str,
+        typer.Option(
+            "--artifact-id",
+            help="Write the evidence artifact under .edgehunter/runs/<id>/shrink.json.",
+        ),
+    ] = "",
+) -> None:
+    """Minimize ONE integer counterexample against ONE user-declared contract.
+
+    An exact test expectation cannot be shrunk: ``assert f(100) == 200`` describes
+    one invocation, so changing the input invalidates the oracle. A *contract* is
+    different -- it declares a condition over a range of inputs, so it keeps
+    applying as the input shrinks. This command requires one explicitly selected
+    contract file, one contract id, one starting integer, and ``--allow-execution``.
+
+    The search is bounded and deterministic, runs entirely in the same hardened
+    Docker sandbox as ``run`` against one staged source snapshot, and reports the
+    smallest input it *verified*. It never claims a global minimum, and a result
+    is a reproduced mismatch against a user declaration, not a proven defect.
+    """
+    if not allow_execution:
+        typer.secho(
+            "error: shrinking requires explicit authorization; pass --allow-execution",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=EXIT_EXECUTION_REFUSED)
+
+    try:
+        analysis = analyze_repository(path)
+    except ScanError as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_INVALID_INPUT) from exc
+
+    request = ShrinkRequest(
+        contract_path=contract_file,
+        contract_id=contract_id,
+        seed=start_int,
+        target_spec=target,
+        policy=ShrinkPolicy(max_proposals=max_attempts, max_executions=max_executions),
+        timeout_seconds=timeout,
+    )
+    try:
+        result = shrink_integer(
+            analysis,
+            path if path.is_dir() else path.parent,
+            request,
+            authorized=True,
+            repository_context=runtime_context(),
+        )
+    except ExecutionRefused as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=EXIT_EXECUTION_REFUSED) from exc
+
+    _print_shrink(result)
+
+    if artifact_id:
+        try:
+            written = write_shrink_artifact(
+                result, contract_sha=_contract_digest(contract_file), run_id=artifact_id
+            )
+        except (OSError, ValueError) as exc:
+            typer.secho(f"error: the artifact could not be written: {exc}", fg=typer.colors.RED)
+        else:
+            typer.echo("")
+            typer.echo(f"Evidence artifact: {written.as_posix()}")
+
+    # A contract that is missing, invalid, out of domain, or bound to changed
+    # source is invalid user input, not an execution failure.
+    if result.status is ShrinkStatus.REFUSED:
+        raise typer.Exit(code=EXIT_INVALID_INPUT)
+    if result.status is ShrinkStatus.INCONCLUSIVE:
+        raise typer.Exit(code=EXIT_EXECUTION_REFUSED)
+    raise typer.Exit(code=EXIT_SHRINK_COMPLETED)
+
+
+def _contract_digest(path: Path) -> str:
+    """The contract file's own fingerprint, recorded in the artifact.
+
+    Falls back to a recorded placeholder when the file is unreadable, which can
+    only happen for a result that is already a refusal carrying its own reason.
+    """
+
+    from edgehunter.fingerprint import fingerprint_file
+
+    try:
+        return fingerprint_file(path)
+    except OSError:
+        return "unavailable"
+
+
+def _print_shrink(result: ShrinkResult) -> None:
+    """Print one minimization result, with provenance visible and no overstatement."""
+
+    typer.echo("EdgeHunter shrink")
+    typer.echo("")
+    typer.echo("  Bounded minimization of one integer against one user-declared contract.")
+    typer.echo("  A contract is an expectation the user asserts, not a proven fact.")
+    typer.echo("")
+    typer.echo(f"  Target:          {result.target_identity or '(unresolved)'}")
+    typer.echo(f"  Contract:        {result.contract_id or '(none)'}")
+    typer.echo(f"  Oracle source:   {result.contract_source.value}")
+    typer.echo(f"  Parameter:       {result.parameter or '(none)'}")
+    typer.echo(f"  Seed:            {result.parameter} = {result.seed_value} [user_supplied_seed]")
+    typer.echo(f"  Source snapshot: {'verified' if result.snapshot_verified else 'not verified'}")
+    typer.echo("")
+
+    if result.attempts:
+        typer.echo("  Shrink proposals")
+        typer.echo("")
+        for attempt in result.attempts:
+            typer.echo(
+                f"    {result.parameter} = {attempt.value:<8} abs={attempt.complexity:<8} "
+                f"{attempt.outcome.value}"
+            )
+            typer.echo(f"        {attempt.reason}")
+            if attempt.signature_matches:
+                typer.echo(f"        failure signature: {attempt.failure_signature}")
+        typer.echo("")
+
+    typer.echo(f"  Proposals executed: {result.proposals_considered}")
+    typer.echo(
+        f"  Proposal list exhausted: {'yes' if result.proposals_exhausted else 'no (budget stop)'}"
+    )
+    typer.echo(f"  Containers used:   {result.executions_consumed}")
+    typer.echo("")
+
+    if result.best_value is not None:
+        verb = "Reduced" if result.reduced else "Smallest verified input"
+        typer.echo(f"  {verb}: {result.parameter} = {result.best_value}")
+        if result.best_signature:
+            typer.echo(f"  Failure signature:  {result.best_signature}")
+    typer.echo("")
+    typer.echo(f"  Result: {result.status.value}")
+    typer.echo(f"  Reason: {result.reason}")
+    typer.echo("")
+    typer.echo("  Meaning:")
+    typer.echo("    Reproduced mismatch against the same user-declared contract, on one")
+    typer.echo("    source snapshot, within a bounded deterministic search.")
+    typer.echo("    Not a universal proof of a software defect, and not a statement that")
+    typer.echo("    this input is the smallest possible counterexample.")
 
 
 def _resolve_target(analysis: RepositoryScan, spec: str) -> tuple[str | None, str | None]:

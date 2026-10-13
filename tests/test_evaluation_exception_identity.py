@@ -60,9 +60,10 @@ class TestARealBuiltin:
         assert "ValueError" in identity["exception_builtin_lineage"]
 
     def test_a_real_builtin_matches_a_builtin_expectation(self) -> None:
-        # The string-only form stays usable and keeps its Phase 6B behaviour.
+        # The string-only form stays usable, but with no identity evidence it no
+        # longer decides anything (D-078): a bare name is not an identity.
         assert match_exception("ValueError", None).status is OracleStatus.INCONCLUSIVE
-        assert match_exception("ValueError", "ValueError").status is OracleStatus.MATCH
+        assert match_exception("ValueError", "ValueError").status is OracleStatus.INCONCLUSIVE
 
         verdict = match_exception_observed(
             "ValueError", _identity(name="ValueError", module="builtins", is_builtin=True)
@@ -267,12 +268,28 @@ class TestFUnknownIdentity:
         assert verdict.status is OracleStatus.INCONCLUSIVE
         assert "recorded no exception type" in verdict.reason
 
-    def test_an_observation_without_builtin_evidence_keeps_the_name_rules(self) -> None:
-        """No evidence must not silently become a negative."""
+    def test_an_observation_without_identity_evidence_decides_nothing(self) -> None:
+        """No evidence must not become a verdict in *either* direction (D-078).
+
+        A name-only MATCH is unsound because a target's own
+        ``class ValueError(Exception)`` does not satisfy ``pytest.raises(builtin
+        ValueError)``. A name-only MISMATCH is equally unsound because a target's
+        own ``class KeyError(ValueError)`` *does* satisfy it. With no evidence
+        about which class was raised, both are guesses, so the outcome is
+        ``INCONCLUSIVE``.
+        """
         observed = _identity(name="ValueError")
 
-        assert match_exception_observed("ValueError", observed).status is OracleStatus.MATCH
-        assert match_exception_observed("KeyError", observed).status is OracleStatus.MISMATCH
+        assert match_exception_observed("ValueError", observed).status is OracleStatus.INCONCLUSIVE
+        assert match_exception_observed("KeyError", observed).status is OracleStatus.INCONCLUSIVE
+
+    def test_the_string_only_wrapper_is_equally_undecided(self) -> None:
+        """The legacy entry point must not be a loophole around the same rule."""
+
+        assert match_exception("ValueError", "ValueError").status is OracleStatus.INCONCLUSIVE
+        assert match_exception("ValueError", "KeyError").status is OracleStatus.INCONCLUSIVE
+        # A genuinely absent observation is still inconclusive, for its own reason.
+        assert "recorded no exception type" in match_exception("ValueError", None).reason
 
     def test_a_custom_class_with_no_lineage_is_inconclusive_not_a_mismatch(self) -> None:
         observed = _identity(

@@ -247,6 +247,103 @@ def _cleanup_problems(staged: StagedSource | None, run_root: Path) -> str | None
     return None
 
 
+@dataclass(slots=True)
+class ExecutionSession:
+    """One staged source snapshot that a whole operation reuses.
+
+    ``edgehunter run`` already stages once and runs every attempt against that
+    one copy, which is how its rechecks are guaranteed to measure the same source
+    revision. This class makes that capability available to another operation
+    without a second staging implementation and without a second executor: every
+    :meth:`execute` call is the same :func:`_run_request` the plan route uses.
+
+    The snapshot is fixed for the session's lifetime. An operation that needs
+    many containers for *different inputs* -- which is what minimization is --
+    therefore cannot accidentally compare observations from two different
+    revisions, because there is only ever one revision on disk.
+
+    Cleanup is explicit rather than automatic so a caller can capture
+    :attr:`staged_digests` after the tree is gone and still verify the executed
+    bytes, which is what D-062's snapshot check needs.
+    """
+
+    sandbox: SandboxStatus
+    staged: StagedSource
+    run_root: Path
+    staged_digests: tuple[tuple[str, str], ...]
+
+    def execute(
+        self,
+        request: ExecutionRequest,
+        *,
+        assignments: tuple[ArgumentAssignment, ...] = (),
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> ExecutionResult:
+        """Run one container for one request against this session's snapshot."""
+
+        return _run_request(
+            request,
+            assignments=assignments,
+            staged=self.staged,
+            run_root=self.run_root,
+            timeout_seconds=clamp_timeout(timeout_seconds),
+        )
+
+    def close(self) -> str | None:
+        """Delete the staged tree and temporary directory; report any failure."""
+
+        return _cleanup_problems(self.staged, self.run_root)
+
+
+def open_session(
+    source_root: Path,
+    *,
+    authorized: bool,
+    repository_context: Path,
+) -> tuple[ExecutionSession | None, SandboxStatus]:
+    """Open a snapshot-fixed execution session, or report why it is unavailable.
+
+    Performs the same authorization, availability, and image checks
+    :func:`execute_target` performs, in the same order, so a shrink operation
+    cannot reach a container by a route the ``run`` command could not.
+    """
+
+    if not authorized:
+        raise ExecutionRefused("execution requires explicit authorization; pass --allow-execution")
+
+    available, detail = docker_available()
+    if not available:
+        return None, _unavailable_sandbox(detail)
+
+    try:
+        image_ready, image_detail = ensure_image(repository_context)
+    except DockerUnavailable as exc:
+        return None, _unavailable_sandbox(str(exc))
+    if not image_ready:
+        return None, _unavailable_sandbox(image_detail)
+
+    sandbox = SandboxStatus(
+        backend=BACKEND_NAME, state=SandboxState.READY, detail=image_detail, image=WORKER_IMAGE
+    )
+    run_root = Path(tempfile.mkdtemp(prefix="edgehunter-run-"))
+    try:
+        staged = _stage_workspace(source_root, run_root)
+    except StagingError as exc:
+        _cleanup_problems(None, run_root)
+        return None, SandboxStatus(
+            backend=BACKEND_NAME, state=SandboxState.ERROR, detail=exc.detail
+        )
+    return (
+        ExecutionSession(
+            sandbox=sandbox,
+            staged=staged,
+            run_root=run_root,
+            staged_digests=staged.digests,
+        ),
+        sandbox,
+    )
+
+
 def ensure_image(context: Path) -> tuple[bool, str]:
     """Return whether the trusted worker image is usable, building it if needed."""
     inspect = run_docker(
@@ -360,24 +457,47 @@ def _execute_one(
     timeout_seconds: float,
 ) -> ExecutionResult:
     """Run exactly one container for one plan and decode its single result."""
-    target_ref = build_target_ref(plan)
-    execution_id = new_execution_id()
-    container_name = f"edgehunter-run-{execution_id[:16]}"
-
     try:
-        request = _request_for(plan, function, execution_id)
+        request = _request_for(plan, function, new_execution_id())
     except Exception as exc:  # noqa: BLE001 - assembly refusal becomes a result
         return ExecutionResult(
-            execution_id=execution_id,
-            target=target_ref,
+            execution_id=new_execution_id(),
+            target=build_target_ref(plan),
             action_id=action_identifier(plan),
             outcome=OutcomeKind.INELIGIBLE,
             sandbox=_ready_sandbox(),
             detail=f"request could not be built: {exc}",
         )
+    return _run_request(
+        request,
+        assignments=plan.assignments,
+        staged=staged,
+        run_root=run_root,
+        timeout_seconds=timeout_seconds,
+    )
 
-    input_dir = run_root / f"{execution_id}-in"
-    output_dir = run_root / f"{execution_id}-out"
+
+def _run_request(
+    request: ExecutionRequest,
+    *,
+    assignments: tuple[ArgumentAssignment, ...],
+    staged: StagedSource,
+    run_root: Path,
+    timeout_seconds: float,
+) -> ExecutionResult:
+    """Run exactly one container for one request and decode its single result.
+
+    This is the **only** function in the project that starts a container, and it
+    is shared by every caller. ``edgehunter run`` reaches it through a plan; the
+    shrinker reaches it through a validated seed invocation. Both therefore use
+    identical nonce handling, typed request encoding, Docker hardening, timeouts,
+    bounded capture, result decoding, and container cleanup. A second execution
+    route would be a second, weaker boundary, which D-045 rejected outright.
+    """
+    container_name = f"edgehunter-run-{request.execution_id[:16]}"
+
+    input_dir = run_root / f"{request.execution_id}-in"
+    output_dir = run_root / f"{request.execution_id}-out"
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = DockerPaths(
@@ -387,8 +507,8 @@ def _execute_one(
         document_text = _request_document(request)
     except Exception as exc:  # noqa: BLE001 - an oversized request is a refusal
         return ExecutionResult(
-            execution_id=execution_id,
-            target=target_ref,
+            execution_id=request.execution_id,
+            target=request.target,
             action_id=request.action_id,
             outcome=OutcomeKind.INELIGIBLE,
             sandbox=_ready_sandbox(),
@@ -398,8 +518,8 @@ def _execute_one(
         paths.request.write_text(document_text, encoding="utf-8")
     except OSError as exc:
         return ExecutionResult(
-            execution_id=execution_id,
-            target=target_ref,
+            execution_id=request.execution_id,
+            target=request.target,
             action_id=request.action_id,
             outcome=OutcomeKind.WORKER_FAILURE,
             sandbox=_ready_sandbox(),
@@ -418,13 +538,13 @@ def _execute_one(
         cleanup_ok = True
 
     return _decode_outcome(
-        execution_id=execution_id,
+        execution_id=request.execution_id,
         request=request,
         outcome=outcome,
         timeout_seconds=timeout_seconds,
         result_path=paths.output,
         cleanup_ok=cleanup_ok,
-        assignments=plan.assignments,
+        assignments=assignments,
     )
 
 

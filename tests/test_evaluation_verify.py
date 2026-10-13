@@ -12,6 +12,7 @@ manufacture a bug report.
 
 from __future__ import annotations
 
+import builtins
 from dataclasses import replace
 from pathlib import Path
 
@@ -61,6 +62,32 @@ from edgehunter.oracle.models import (
     TargetResolution,
     TestExpectationCandidate,
 )
+
+
+def _builtin_raised(name: str) -> RuntimeObservation:
+    """An observation of a raised real builtin exception, as the worker reports it.
+
+    Since Phase 7A a raised outcome always carries the exception's module,
+    qualified name, builtin flag, and lineage: the worker reads them from the
+    class object itself. Tests must describe what a real worker produces, because
+    an observation with *no* identity evidence is now a different thing entirely
+    (it supports no verdict in either direction -- see D-078).
+    """
+    from edgehunter.runtime.worker import _exception_identity
+
+    # `cls.__new__(cls)` rather than `cls(...)`: several builtin exceptions
+    # require several constructor arguments, and this helper needs the class
+    # identity, not a usable instance.
+    document = _exception_identity(getattr(builtins, name).__new__(getattr(builtins, name)))
+    return RuntimeObservation(
+        outcome=OutcomeKind.RAISED,
+        exception_type=name,
+        exception_module=document.get("exception_module"),
+        exception_qualname=document.get("exception_qualname"),
+        exception_builtin=document.get("exception_builtin"),
+        exception_builtin_lineage=tuple(document.get("exception_builtin_lineage", ())),
+    )
+
 
 TARGET = TargetRef(relative_file="calculator.py", qualified_name="add", lineno=1)
 READY = SandboxStatus(backend="docker", state=SandboxState.READY)
@@ -350,7 +377,7 @@ class TestExpectedExceptions:
     def test_the_expected_builtin_exception_matches(self) -> None:
         verdict = _evaluate(
             self._raises_expectation("ValueError"),
-            RuntimeObservation(outcome=OutcomeKind.RAISED, exception_type="ValueError"),
+            _builtin_raised("ValueError"),
         )
 
         assert verdict.status is OracleStatus.MATCH
@@ -364,7 +391,7 @@ class TestExpectedExceptions:
     def test_a_different_builtin_exception_contradicts(self) -> None:
         verdict = _evaluate(
             self._raises_expectation("ValueError"),
-            RuntimeObservation(outcome=OutcomeKind.RAISED, exception_type="KeyError"),
+            _builtin_raised("KeyError"),
         )
 
         assert verdict.status is OracleStatus.MISMATCH
@@ -372,11 +399,33 @@ class TestExpectedExceptions:
     def test_a_builtin_subclass_satisfies_a_builtin_expectation(self) -> None:
         verdict = _evaluate(
             self._raises_expectation("ValueError"),
-            RuntimeObservation(outcome=OutcomeKind.RAISED, exception_type="UnicodeDecodeError"),
+            _builtin_raised("UnicodeDecodeError"),
         )
 
         assert verdict.status is OracleStatus.MATCH
         assert "subclass" in verdict.reason
+
+    def test_an_observation_with_no_identity_evidence_is_inconclusive(self) -> None:
+        """A bare name is not an identity, in either direction (D-078).
+
+        A target may define its own `class ValueError(Exception)`, which
+        `pytest.raises(builtin ValueError)` would not catch. Symmetrically, a
+        target's own `class KeyError(ValueError)` *would* satisfy it. So with no
+        evidence about which class was raised, neither MATCH nor MISMATCH is
+        supportable, and comparing names would be the exact guess D-061 rejects.
+        """
+        bare = RuntimeObservation(outcome=OutcomeKind.RAISED, exception_type="ValueError")
+
+        assert _evaluate(self._raises_expectation("ValueError"), bare).status is (
+            OracleStatus.INCONCLUSIVE
+        )
+        assert (
+            _evaluate(
+                self._raises_expectation("ValueError"),
+                RuntimeObservation(outcome=OutcomeKind.RAISED, exception_type="KeyError"),
+            ).status
+            is OracleStatus.INCONCLUSIVE
+        )
 
     def test_a_custom_exception_matched_by_bare_name_is_inconclusive(self) -> None:
         """Two modules may each define `PaymentError`; nothing proves they are one
@@ -401,7 +450,7 @@ class TestExpectedExceptions:
     def test_two_qualified_names_that_match_are_a_match(self) -> None:
         verdict = _evaluate(
             self._raises_expectation("builtins.ValueError"),
-            RuntimeObservation(outcome=OutcomeKind.RAISED, exception_type="builtins.ValueError"),
+            _builtin_raised("ValueError"),
         )
 
         assert verdict.status is OracleStatus.MATCH

@@ -43,9 +43,9 @@ straightforward code.
 
 **Early development. Structure, semantics, boundaries, structural risk ranking,
 explicit oracle mining, static annotation shapes, safe baseline synthesis,
-invocation planning, strategy planning, an isolated Docker execution backend, and
-runtime oracle evaluation are implemented; the counterexample search engine is
-not.**
+invocation planning, strategy planning, an isolated Docker execution backend,
+runtime oracle evaluation, and bounded single-integer counterexample minimization
+are implemented; adaptive search is not.**
 
 What exists today:
 
@@ -941,6 +941,21 @@ never on duration, execution id, container id, or temporary path. `NaN` and
   is provably absent from it.
 - **Custom return objects are not compared.** When the protocol cannot represent a
   return value, the result is `UNSUPPORTED`, never `MISMATCH`.
+- **An observation with no identity evidence decides nothing.** A result document
+  that records only an exception's bare name cannot establish whether it is a
+  standard-library class, so the expected exception verdict is `INCONCLUSIVE` —
+  in *both* directions. A name-only `MATCH` would hide a real mismatch (a target
+  may define its own `class ValueError(Exception)`), and a name-only `MISMATCH`
+  would hide a real match (a target's own `class KeyError(ValueError)` satisfies
+  `pytest.raises(ValueError)`). Such documents still decode; they simply support no
+  exception verdict.
+- **No counterexample is generalized or minimized beyond what the evidence covers.**
+  An exact test expectation is never applied to a different input, a production
+  guard is never promoted to a reusable contract, and a contract is never rebound
+  to changed source. A successful reduction preserves the target, the source
+  snapshot, the contract, the verdict, the failure character, and a reproduced
+  result — and is reported as the smallest input a bounded search verified, never
+  as a proven minimum.
 - **An unverified source snapshot yields no verdict.** Oracle evidence describes a
   specific revision; if the executed bytes cannot be proven to be those bytes, the
   status is `INCONCLUSIVE`.
@@ -960,6 +975,186 @@ and impact assessment are not performed in this phase.
 It also does not claim support for arbitrary type constructors, complex fixtures,
 custom object serialization, general Python import resolution, all possible Python
 exception relationships, or automatic bug detection from every exception.
+
+## Shrinking one integer counterexample
+
+`edgehunter scan` is static and `edgehunter run` observes. A third command,
+`edgehunter shrink`, minimizes **one** integer input against **one**
+user-declared contract.
+
+### Why an exact test expectation cannot be shrunk
+
+```python
+def double(x: int) -> int:
+    return x * 2 + 1
+
+
+# the repository's test
+assert double(100) == 200
+```
+
+Execution shows `double(100) → 201`, a genuine `MISMATCH` against that
+expectation. But the expectation describes **one** invocation. It says nothing
+about `double(10)`, so a shrinker that tried `double(10)` and compared the result
+with `200` would be reporting a verdict against an oracle that does not apply.
+EdgeHunter refuses instead — and refuses *before* executing anything, with no
+flag that bypasses it.
+
+### The difference between an expectation and a contract
+
+| | Existing test expectation | User-declared contract |
+|---|---|---|
+| Source | mined from `assert` / `pytest.raises` in the repository | a JSON file you name explicitly |
+| Applies to | one exact recorded invocation | every input inside a declared domain |
+| Proven? | it is the repository's own claim | **no** — it is a claim you assert |
+| Can it authorize shrinking? | **no** | yes |
+
+A contract is an **expectation the user asserts, not a fact proven from the code**.
+Nothing is inferred: a production `if x < 0: raise ValueError` is not converted
+into a contract, and an `assert f(1) == 2` is never turned into a formula.
+
+### The contract format
+
+One contract family only, `version` exactly `1`:
+
+```json
+{
+  "version": 1,
+  "contracts": [
+    {
+      "id": "negative-age-rejection",
+      "target": "validators.py::validate_age",
+      "source_sha256": "<64 lowercase hex characters>",
+      "parameter": "age",
+      "domain": { "operator": "lt", "integer": "0" },
+      "expectation": { "kind": "raises_builtin", "exception": "ValueError" }
+    }
+  ]
+}
+```
+
+`operator` is one of `lt`, `le`, `gt`, `ge`; `integer` is a decimal **string**
+bounded to signed 64-bit, so a JSON boolean, a float, or an arbitrary-precision
+number cannot pass; `exception` must be a real class from `builtins`, checked by
+identity rather than by spelling. Unknown keys, duplicate JSON keys, duplicate
+ids, missing fields, an unsupported version, an oversized file, and any
+`../`/absolute/Windows-drive path are all refused during parsing — before a
+container could start. `source_sha256` binds the contract to one revision of the
+target file: if the file has changed since the contract was written, the operation
+is `REFUSED` and the contract is never silently rebound.
+
+There is deliberately no general property language: no arbitrary predicates, no
+Python expressions, no `AND`/`OR` trees, no custom comparators, no string/list/
+float or multi-parameter shrinking.
+
+### A tested example
+
+With `validators.py` containing `def validate_age(age: int) -> int: return age`
+and the contract above:
+
+```console
+$ edgehunter shrink ./example --target validators.py::validate_age \
+    --contract-file ./example/contracts.json \
+    --contract-id negative-age-rejection \
+    --start-int=-100 --allow-execution
+EdgeHunter shrink
+
+  Bounded minimization of one integer against one user-declared contract.
+  A contract is an expectation the user asserts, not a proven fact.
+
+  Target:          validators.py::validate_age
+  Contract:        negative-age-rejection
+  Oracle source:   user_declared_contract
+  Parameter:       age
+  Seed:            age = -100 [user_supplied_seed]
+  Source snapshot: verified
+
+  Shrink proposals
+
+    age = -1       abs=1        accepted
+        abs(-1) is smaller than abs(-100) and the same failure returned normally reproduced 2/2 times against the same contract
+        failure signature: returned normally
+    age = -51      abs=51       not_simpler
+        abs(-51) is not smaller than the current best abs(-1)
+    ...
+
+  Proposals executed: 1
+  Proposal list exhausted: yes
+  Containers used:   4
+
+  Reduced: age = -1
+  Failure signature:  returned normally
+
+  Result: shrunk
+  Reason: reduced age from -100 to -1 (abs 1), every accepted value verified against the same contract on the same source snapshot
+
+  Meaning:
+    Reproduced mismatch against the same user-declared contract, on one
+    source snapshot, within a bounded deterministic search.
+    Not a universal proof of a software defect, and not a statement that
+    this input is the smallest possible counterexample.
+```
+
+That output is the real result of the real command against a real Docker
+daemon: four containers, the seed reproduced twice, one accepted reduction, and
+seven proposals rejected without spending a container.
+
+### Requirements before anything runs
+
+1. an explicitly selected contract file and contract id;
+2. `--allow-execution` (a contract never authorizes execution by existing);
+3. the contract's `source_sha256` matching the analyzed file;
+4. a top-level synchronous function whose only parameter is the contract's,
+   annotated `int`, with no default, no decorators, and no receiver;
+5. a seed inside the declared domain;
+6. no conflicting exact-input expectation from the repository.
+
+Only then does the seed run — **twice** — and both attempts must contradict the
+contract with one agreed failure. A single mismatch is not enough, because a flaky
+input is not a counterexample.
+
+### A smaller input must preserve the failure
+
+If the original call *returned* where a `ValueError` was expected, then a trial
+that raises `TypeError` also contradicts the contract — but it is a different
+observed failure. EdgeHunter rejects it. The signature is the outcome category
+plus the observed exception's qualified identity; messages, durations, execution
+ids, and container ids are never part of it, and a timeout has no signature at
+all.
+
+### Budgets and wording
+
+| Bound | Default | Hard cap |
+|---|---|---|
+| shrink proposals | 8 | 20 |
+| total containers | 32 | 64 |
+| attempts per verified value | 2 | 3 |
+
+The search is bounded and deterministic: the domain's closest-to-zero value is
+proposed first, then integer midpoints walking from the seed toward it. It is a
+heuristic, not an exhaustive proof, and it never assumes the target's behaviour is
+monotone.
+
+A result says *reduced counterexample against a user-declared contract* and
+*smallest verified input found during this bounded search*. It never says
+*globally minimal counterexample*, *automatically proved bug*, or *critical
+vulnerability*, and there is no severity and no confidence score.
+
+With `--artifact-id`, a versioned JSON record is written to
+`.edgehunter/runs/<id>/shrink.json` (Git-ignored) containing the target identity,
+the source fingerprint, the contract id and file fingerprint, the user-declared
+provenance, the seed and its origin, the reduced value, the budget, and every
+attempt with its rejection reason. Captured target output and exception messages
+are deliberately excluded.
+
+### Not supported in this version
+
+Only **one integer parameter**, **one declared inequality**, **one expected
+builtin exception**, **one source snapshot**, and **one failure signature**.
+Not: shrinking existing-test expectations, custom objects, strings, lists,
+dictionaries, floats, multiple parameters, stateful sequences, symbolic
+constraints, framework fixtures, or custom-exception expectation resolution. A
+correct narrow shrinker is preferable to a broad unsound one.
 
 ## Architecture
 
@@ -1022,6 +1217,15 @@ src/edgehunter/
 │   ├── repository.py  snapshot verification, reproduction, JSON artifact
 │   ├── recheck.py     attempt sequence bookkeeping
 │   └── values.py      materialization + canonical identity (NaN, -0.0 safe)
+├── shrink/            minimization: can an oracle survive an input change at all?
+│   ├── __init__.py    public interface
+│   ├── models.py      shrinkability kinds, statuses, policy, attempts, result
+│   ├── shrinkability.py  which evidence is reusable, and which is refused
+│   ├── contract.py    versioned user-declared JSON contract, strictly validated
+│   ├── domain.py      pure integer domain (lt/le/gt/ge) and closest-to-zero
+│   ├── proposals.py   deterministic bounded proposal generation (abs(x) metric)
+│   ├── signature.py   the observed failure character a reduction must preserve
+│   └── repository.py  preflight, snapshot-fixed search, acceptance, artifact
 └── runtime/           the trusted worker: the ONLY code that loads target code
     ├── __init__.py    package marker
     ├── worker.py      in-container loader/invoker, runs only inside the sandbox
@@ -1126,9 +1330,11 @@ mypy                        # strict type checking (configured in pyproject.toml
       exceptions, optional bounded reproduction, conservative findings)
 - [x] action coverage repair (`bool` and `str` parameters produce plans)
 - [x] qualified exception identity (module, qualname, builtin lineage from the sandbox)
+- [x] shrinkability classification (an exact oracle refuses input-changing shrink)
+- [x] bounded counterexample minimization (one integer, one user-declared contract)
 - [ ] property-based test generation
 - [ ] counterexample search
-- [ ] failure shrinking
+- [ ] failure shrinking beyond one integer
 - [ ] adaptive neighborhood search
 - [ ] learned search policy
 
