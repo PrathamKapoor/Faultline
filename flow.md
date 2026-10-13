@@ -1397,16 +1397,16 @@ never being a verdict, and the stale-worker-image recipe.
 
 | Area | Change | Files | Commit | Decision |
 |---|---|---|---|---|
-| benchmark | Added the `benchmark` package: versioned corpus, nine real fixture sources, the harness that runs the real engine, and the measurement model | src/edgehunter/benchmark/, src/edgehunter/benchmark/fixtures/ | uncommitted | D-111 |
-| benchmark | Added `comparable_fixture_ids()`, `restrict_to` aggregation, and `head_to_head()`; a policy that reproduced nothing is never averaged as zero | src/edgehunter/benchmark/models.py | uncommitted | D-113 |
-| benchmark | Added `sandbox-unavailable`, `unsupported-shape`, `fingerprint-mismatch`, `bool-materialization`, and `string-materialization` subsystem cases, so the corpus covers refusals and materialization rather than only search | src/edgehunter/benchmark/harness.py, src/edgehunter/benchmark/corpus.py | uncommitted | D-111 |
-| CLI | Added the `benchmark` command with `--allow-execution`, `--only`, and `--report`, exiting non-zero when a case disagrees with its declaration | src/edgehunter/cli.py | uncommitted | D-111 |
-| config | Added the benchmark fixture package data, the pyyaml dev dependency, and the fixture exclusions from ruff and mypy | pyproject.toml | uncommitted | D-111, D-116 |
-| docs | Added `SECURITY.md`: trust zones, what runs where, every container restriction with its purpose, and a full limitations section | SECURITY.md | uncommitted | D-115 |
-| ci | Added a static workflow (3.10–3.12 + Windows + wheel smoke test) and a separate restricted Docker workflow with image rebuild and cleanup assertion | .github/workflows/ci.yml, .github/workflows/docker-integration.yml | uncommitted | D-116 |
-| tests | Added the corpus suite: version, bounds, source existence, trigger consistency, and the mechanical checks that the engine cannot see the corpus and that a miss is never averaged as a fast run | tests/test_benchmark_corpus.py | uncommitted | D-111, D-113, D-114 |
-| tests | Added the real-Docker benchmark suite: every case as declared, the correct target silent, matched budgets and universes, reproduction costing an extra execution, and structural (never outcome) head-to-head assertions | tests/test_benchmark_integration.py | uncommitted | D-112 |
-| tests | Added the workflow suite: valid YAML, step structure, read-only permissions, no Docker in the static workflow, synthetic fixtures only, image rebuild, and cleanup assertion | tests/test_workflows.py | uncommitted | D-116 |
-| docs | Rewrote `README.md` as a product page with output captured from real runs, including the unfavourable benchmark result | README.md | uncommitted | D-118 |
-| docs | Recorded D-111 through D-120 and this flow section | decisions.md, flow.md | uncommitted | D-111..D-120 |
-| hygiene | Removed four stray empty directories that `git status` could not surface, having verified each held zero entries | t1/, t2/, t3/, t4/ | uncommitted | D-120 |
+| benchmark | Added the `benchmark` package: versioned corpus, nine real fixture sources, the harness that runs the real engine, and the measurement model | src/edgehunter/benchmark/, src/edgehunter/benchmark/fixtures/ | c35e1f5 | D-111 |
+| benchmark | Added `comparable_fixture_ids()`, `restrict_to` aggregation, and `head_to_head()`; a policy that reproduced nothing is never averaged as zero | src/edgehunter/benchmark/models.py | c35e1f5 | D-113 |
+| benchmark | Added `sandbox-unavailable`, `unsupported-shape`, `fingerprint-mismatch`, `bool-materialization`, and `string-materialization` subsystem cases, so the corpus covers refusals and materialization rather than only search | src/edgehunter/benchmark/harness.py, src/edgehunter/benchmark/corpus.py | c35e1f5 | D-111 |
+| CLI | Added the `benchmark` command with `--allow-execution`, `--only`, and `--report`, exiting non-zero when a case disagrees with its declaration | src/edgehunter/cli.py | c35e1f5 | D-111 |
+| config | Added the benchmark fixture package data, the pyyaml dev dependency, and the fixture exclusions from ruff and mypy | pyproject.toml | c35e1f5 | D-111, D-116 |
+| docs | Added `SECURITY.md`: trust zones, what runs where, every container restriction with its purpose, and a full limitations section | SECURITY.md | c35e1f5 | D-115 |
+| ci | Added a static workflow (3.10–3.12 + Windows + wheel smoke test) and a separate restricted Docker workflow with image rebuild and cleanup assertion | .github/workflows/ci.yml, .github/workflows/docker-integration.yml | c35e1f5 | D-116 |
+| tests | Added the corpus suite: version, bounds, source existence, trigger consistency, and the mechanical checks that the engine cannot see the corpus and that a miss is never averaged as a fast run | tests/test_benchmark_corpus.py | c35e1f5 | D-111, D-113, D-114 |
+| tests | Added the real-Docker benchmark suite: every case as declared, the correct target silent, matched budgets and universes, reproduction costing an extra execution, and structural (never outcome) head-to-head assertions | tests/test_benchmark_integration.py | c35e1f5 | D-112 |
+| tests | Added the workflow suite: valid YAML, step structure, read-only permissions, no Docker in the static workflow, synthetic fixtures only, image rebuild, and cleanup assertion | tests/test_workflows.py | c35e1f5 | D-116 |
+| docs | Rewrote `README.md` as a product page with output captured from real runs, including the unfavourable benchmark result | README.md | c35e1f5 | D-118 |
+| docs | Recorded D-111 through D-120 and this flow section | decisions.md, flow.md | c35e1f5 | D-111..D-120 |
+| hygiene | Removed four stray empty directories that `git status` could not surface, having verified each held zero entries | t1/, t2/, t3/, t4/ | c35e1f5 | D-120 |

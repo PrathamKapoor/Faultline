@@ -1129,7 +1129,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-111: The benchmark corpus is synthetic, versioned, mixed, and executes the real engine
 
-- Date / phase / commit: 2026-10-13, Final consolidation session, uncommitted
+- Date / phase / commit: 2026-10-13, Final consolidation session, c35e1f5
 - Context: Phase 7C measured a single fixture and said so. That cannot distinguish a good heuristic from a lucky one, and the roadmap's next item — an empirical benchmark — needs a defensible design before it needs numbers.
 - Decision: A new `src/edgehunter/benchmark/` package with a versioned twelve-fixture corpus (`CORPUS_VERSION = "1.0.0"`), nine real fixture sources under `benchmark/fixtures/`, and a harness that builds each fixture into a scratch repository, writes a contract bound to that repository's real SHA-256, and calls the same `explore_integer()` the CLI calls. Fixtures are declared in a manifest with their defect kind, expected classification, known trigger, and which policies to run. Aggregates are computed only over fixtures every compared policy ran.
 - Why: Synthetic fixtures make the seeded behaviour auditable — a reader can read a dozen-line target and check it against its declaration, which no sampled real repository allows. Running the real engine means there is no second implementation that could disagree with the product. Versioning means a change to the corpus is visible in every report and two results are comparable only at the same version.
@@ -1139,7 +1139,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-112: A benchmark must be able to report that the tool under test lost
 
-- Date / phase / commit: 2026-10-13, Final consolidation session, uncommitted
+- Date / phase / commit: 2026-10-13, Final consolidation session, c35e1f5
 - Context: The first honest run of the corpus produced an unfavourable result: the deterministic baseline reproduced 4 of 5 comparable fixtures and the feedback-guided policy 2, winning none outright. Every incentive in a release session points toward making that number look better.
 - Decision: The corpus deliberately contains `seed-fault` and `far-value-fault`, where the static order is better because a mined comparison names the interesting value directly and a one-step-at-a-time neighbourhood walk cannot reach it inside the budget. The measured result is reported verbatim in the README, including that the adaptive policy won no fixture. The integration tests assert the *shape* of the comparison (there is a tie, there is an outright win, there is a fixture neither policy reached) and never which policy wins. No policy priority rule was changed after the measurement.
 - Why: A benchmark that can only produce a favourable result measures the fixtures rather than the policies, and tuning the policy against it would destroy the only instrument the roadmap has for evaluating a future learned policy. A defensible negative result is worth more than a fabricated positive one, because the next phase needs to know that proximity is a weak heuristic before it tries to beat it.
@@ -1149,7 +1149,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-113: Cross-policy aggregates cover only the fixtures both policies ran
 
-- Date / phase / commit: 2026-10-13, Final consolidation session, uncommitted
+- Date / phase / commit: 2026-10-13, Final consolidation session, c35e1f5
 - Context: The first harness averaged each policy over *its own* case set. Because `non-monotonic` and `wrong-exception` ran only under `feedback_guided`, that policy's mean looked lower for reasons that had nothing to do with how well it chooses inputs.
 - Decision: `comparable_fixture_ids()` computes the intersection of fixtures every compared policy ran. `aggregate_probes_to_first_reproduction()` accepts `restrict_to`, and the harness emits three blocks: cross-policy aggregates over the intersection, per-policy totals over each policy's own fixtures, and a `head_to_head` per-fixture table. Averages cover only cases that reproduced; a case that reproduced nothing is counted under `cases_not_reproduced` and never averaged as zero.
 - Why: Averaging over different case sets answers "which set of fixtures was easier", not "which policy chose better inputs". And treating a miss as zero probes would reward a policy precisely for failing to find a defect — the single worst error a search benchmark can make, because it converts the metric into an inverse one for the cases that matter most.
@@ -1159,7 +1159,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-114: The engine must not be able to see the benchmark
 
-- Date / phase / commit: 2026-10-13, Final consolidation session, uncommitted
+- Date / phase / commit: 2026-10-13, Final consolidation session, c35e1f5
 - Context: A corpus whose values appear in the production code measures a lookup table. This is not hypothetical: a feedback policy tuned against fixture expectations would produce excellent numbers and no information.
 - Decision: `tests/test_benchmark_corpus.py` scans `search/policy.py`, `search/actions.py`, `search/state.py`, and `search/repository.py` for any fixture id, fixture source name, or distinctive seeded trigger value, and separately asserts that no module outside `cli.py` and the `benchmark` package imports `edgehunter.benchmark`. `cli.py` is excluded from the import check because it legitimately imports the corpus to expose the `benchmark` command and it chooses no inputs.
 - Why: The exclusion is deliberately narrow. `cli.py` is presentation; the engine is not. A rule that had to exempt the orchestrator would be too weak, and a rule that exempted the orchestrator *and* the policy would be theatre.
@@ -1169,7 +1169,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-115: The trust model is documented as a threat model, including the parts it does not solve
 
-- Date / phase / commit: 2026-10-13, Final consolidation session, uncommitted
+- Date / phase / commit: 2026-10-13, Final consolidation session, c35e1f5
 - Context: The project already had a section on the sandbox being "a strong default, not a proof", buried inside a 1500-line README whose structure followed development history rather than a reader's questions.
 - Decision: A top-level `SECURITY.md` separates the trust zones (host orchestrator, untrusted repository, staged snapshot, container, evidence artifacts), states what runs where and why Docker is required rather than optional, tabulates every container restriction with its purpose, and devotes a section to what remains possible: the target and the worker share a process, the nonce is a consistency check rather than a cryptographic proof, container escape is out of scope, resource limits are best-effort against determined code, and a timeout is never a verdict.
 - Why: "The sandbox is secure" is the claim this project is most tempted to make and least entitled to. The nonce/execution-id echo is genuinely useful and genuinely not proof, and saying only the first half would be the kind of overstatement the rest of the project is built to avoid.
@@ -1179,7 +1179,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-116: CI is split into a secret-free static workflow and a restricted Docker workflow
 
-- Date / phase / commit: 2026-10-13, Final consolidation session, uncommitted
+- Date / phase / commit: 2026-10-13, Final consolidation session, c35e1f5
 - Context: There was no CI at all, and the project has two genuinely different kinds of test: ~1200 that execute nothing, and ~80 that start hardened containers.
 - Decision: `.github/workflows/ci.yml` runs ruff, ruff format, strict mypy, and `pytest -m "not integration"` on Python 3.10/3.11/3.12 on Linux, the same unit tests on Windows, and a separate job that builds the sdist and wheel, asserts the Dockerfile, worker, and a fixture ship inside the wheel, installs the wheel into a clean virtual environment, and runs `edgehunter --version`, `--help`, `scan --help`, and a scan from outside the checkout. `.github/workflows/docker-integration.yml` runs the container suite and the benchmark, rebuilds the worker image first, and fails if any container is left behind. Both declare `permissions: contents: read` and use no secrets. Neither uses `pull_request_target`.
 - Why: Executing target-shaped code on every push from every contributor is a decision the repository owner should make, not one to ship silently. Splitting also means the fast gate stays fast and a Docker failure is attributable.
@@ -1189,7 +1189,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-117: Packaging is verified by installing a built wheel into a clean environment
 
-- Date / phase / commit: 2026-10-13, Final consolidation session, uncommitted
+- Date / phase / commit: 2026-10-13, Final consolidation session, c35e1f5
 - Context: An editable install hides packaging bugs: missing package data, a broken entry point, and a module that only resolves from the checkout all work perfectly in place and fail for a user.
 - Decision: Both artifacts are built with `python -m build`. The wheel is installed into a freshly created virtual environment, and the console script, `python -m edgehunter`, and all five command help pages are exercised from outside the checkout. A real `run` and a real benchmark fixture were executed from the installed distribution to prove the Dockerfile, the worker, and the corpus fixtures all cross the boundary.
 - Why: `runtime/Dockerfile` is package data, and the benchmark fixtures now are too. Both would be silently missing from a wheel built without the `package-data` declarations, and the failure would appear only at execution time, on a user's machine.
@@ -1199,7 +1199,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-118: The public README is a product page; development history stays in the engineering docs
 
-- Date / phase / commit: 2026-10-13, Final consolidation session, uncommitted
+- Date / phase / commit: 2026-10-13, Final consolidation session, c35e1f5
 - Context: The README had grown to 1553 lines and was organised around the order the work happened in, so a reader looking for "how do I install this" or "can I trust this" had to know the project's phase structure first.
 - Decision: The README is rewritten as a product page: what it is, why it exists, what it does, what it does not do, installation, quickstart, the five core workflows with observed terminal output, the benchmark with its unfavourable result, the architecture, the trust model, limitations, development, license status, and roadmap. Development history, decisions, and call flows remain in `decisions.md`, `flow.md`, and `handoff.md`.
 - Why: The engineering records are genuinely valuable and must not be lost. But they answer "why was this built this way", which is a different question from "what does this do and can I trust it". Both documents now exist for their own reader.
@@ -1209,7 +1209,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-119: No license is selected, and the project is described as having no granted rights
 
-- Date / phase / commit: 2026-10-13, Final consolidation session, uncommitted
+- Date / phase / commit: 2026-10-13, Final consolidation session, c35e1f5
 - Context: No `LICENSE` file exists. The project has one runtime dependency (`typer`), which is MIT-licensed and compatible with either MIT or Apache-2.0, so there is no third-party obstacle. But choosing a license grants rights on the owner's behalf and is not this session's to give.
 - Decision: No license file is created. The README's License section states that none has been chosen and that EdgeHunter therefore has no granted rights and no open-source license. Publication is blocked pending owner selection.
 - Why: Silently adding MIT would fabricate an authorization that was never given, and describing the project as permissively licensed before the file exists would be a false claim in the project's front matter. Recording the blocker is the honest outcome.
@@ -1219,7 +1219,7 @@ a new entry that references them. Decisions are referenced from `flow.md` and
 
 ### D-120: Stray empty directories and generated artifacts are removed from the working tree
 
-- Date / phase / commit: 2026-10-13, Final consolidation session, uncommitted
+- Date / phase / commit: 2026-10-13, Final consolidation session, c35e1f5
 - Context: The working tree reported clean while containing four empty directories (`t1`–`t4`) left over from earlier sessions. Git does not track empty directories, so `git status` could not surface them, and a reader auditing file hygiene would find them unexplained.
 - Decision: Verified each was genuinely empty (0 entries including hidden files) and removed them. No tracked file was touched, no unrelated directory was deleted, and no Docker image or container belonging to anything else was removed.
 - Why: "Working tree is clean" is a claim about tracked files. An audit that only checks `git status` will miss untracked clutter, which is exactly the sort of thing that makes a repository look less carefully maintained than it is.
